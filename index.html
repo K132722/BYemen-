@@ -3,9 +3,10 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<meta name="theme-color" content="#1b263b" />
+<meta name="theme-color" content="#0a0e27" />
 <title>متابعة عُهد السواقين</title>
 <link rel="manifest" href="./manifest.json" />
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -58,7 +59,6 @@
   </header>
 
   <div class="container">
-    <!-- بيانات السائق -->
     <div class="card driver-info-card">
       <div class="driver-avatar">👤</div>
       <div class="driver-info">
@@ -68,14 +68,12 @@
       </div>
     </div>
 
-    <!-- الرصيد الحالي -->
     <div class="card balance-card">
       <div class="balance-label">الرصيد الحالي</div>
       <div class="balance-value" id="dBalance">0</div>
       <div class="balance-status" id="dBalanceStatus">لا يوجد رصيد</div>
     </div>
 
-    <!-- الأزرار الرئيسية -->
     <div class="actions-grid">
       <button class="action-btn btn-start" id="btnStartTrip">
         <span class="action-icon">🚀</span>
@@ -105,7 +103,6 @@
   </header>
 
   <div class="container">
-    <!-- معلومات البدء -->
     <div class="card trip-meta-card">
       <div class="trip-meta-row">
         <span>بدء الحملة:</span>
@@ -120,12 +117,15 @@
         <span id="tripTotalExpense" class="txt-red">0</span>
       </div>
       <div class="trip-meta-row">
-        <span>المستحق لتصفية:</span>
-        <span id="tripDue">0</span>
+        <span>مستحق السواق:</span>
+        <span id="tripDue" class="txt-orange">0</span>
+      </div>
+      <div class="trip-meta-row highlight-row">
+        <span>النتيجة:</span>
+        <span id="tripResult">0</span>
       </div>
     </div>
 
-    <!-- أزرار العمليات -->
     <div class="actions-grid">
       <button class="action-btn btn-income" id="btnAddIncome">
         <span class="action-icon">💰</span>
@@ -141,7 +141,6 @@
       </button>
     </div>
 
-    <!-- قائمة الحركات -->
     <div class="card">
       <div class="card-header">حركات الحملة</div>
       <div id="transactionsList" class="transactions-list">
@@ -197,7 +196,7 @@
   </div>
 </div>
 
-<!-- ================= شاشة متابعة سائق (للمشرف) ================= -->
+<!-- ================= شاشة متابعة سائق ================= -->
 <div id="adminDriverScreen" class="screen hidden">
   <header class="topbar">
     <div class="topbar-title" id="adminDriverTitle">متابعة السائق</div>
@@ -225,7 +224,7 @@
     <div class="actions-grid two">
       <button class="action-btn btn-income" id="btnSettle">
         <span class="action-icon">➕</span>
-        <span class="action-text">تسوية / إضافة رصيد</span>
+        <span class="action-text">إضافة رصيد</span>
       </button>
       <button class="action-btn btn-expense" id="btnDeduct">
         <span class="action-icon">➖</span>
@@ -242,10 +241,10 @@
 
 <!-- ================= المودالات ================= -->
 
-<!-- مودال استلام عهدة -->
+<!-- استلام عهدة -->
 <div id="incomeModal" class="modal hidden">
   <div class="modal-content">
-    <div class="modal-header">استلام عهدة</div>
+    <div class="modal-header" id="incomeHeader">استلام عهدة</div>
     <div class="modal-body">
       <label class="field-label">استلمت عهدة من</label>
       <input id="incomeFrom" class="input" placeholder="اسم المسلم" />
@@ -266,10 +265,10 @@
   </div>
 </div>
 
-<!-- مودال إدراج خرج -->
+<!-- إدراج خرج -->
 <div id="expenseModal" class="modal hidden">
   <div class="modal-content">
-    <div class="modal-header">إدراج خرج</div>
+    <div class="modal-header" id="expenseHeader">إدراج خرج</div>
     <div class="modal-body">
       <label class="field-label">المبلغ</label>
       <input id="expenseAmount" class="input" type="number" inputmode="numeric" placeholder="0" />
@@ -288,7 +287,7 @@
   </div>
 </div>
 
-<!-- مودال إنهاء الحملة -->
+<!-- إنهاء الحملة -->
 <div id="finishModal" class="modal hidden">
   <div class="modal-content">
     <div class="modal-header">إنهاء الحملة</div>
@@ -318,7 +317,7 @@
   </div>
 </div>
 
-<!-- مودال معاينة الصورة -->
+<!-- معاينة الصورة -->
 <div id="imagePreviewModal" class="modal hidden">
   <div class="modal-content modal-image">
     <img id="previewImage" src="" alt="معاينة" />
@@ -326,7 +325,7 @@
   </div>
 </div>
 
-<!-- مودال تعديل سائق (للمشرف) -->
+<!-- تعديل سائق -->
 <div id="editDriverModal" class="modal hidden">
   <div class="modal-content">
     <div class="modal-header">إعدادات السائق</div>
@@ -349,7 +348,7 @@
   </div>
 </div>
 
-<!-- مودال تسوية رصيد -->
+<!-- تسوية رصيد -->
 <div id="settleModal" class="modal hidden">
   <div class="modal-content">
     <div class="modal-header" id="settleHeader">تسوية الرصيد</div>
@@ -367,7 +366,7 @@
   </div>
 </div>
 
-<!-- مودال عرض التقرير -->
+<!-- عرض التقرير -->
 <div id="reportModal" class="modal hidden">
   <div class="modal-content modal-wide">
     <div class="modal-header">تقرير الحملة</div>
