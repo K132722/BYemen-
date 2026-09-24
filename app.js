@@ -19,12 +19,13 @@ const state = {
   user: null,
   currentTrip: null,
   online: navigator.onLine,
-  drivers: {},          // نسخة معدلة من بيانات السواقين
-  trips: [],            // كل الحملات
-  updates: [],          // تحديثات المشرف
-  pendingSync: [],      // عناصر بانتظار المزامنة
+  drivers: {},
+  trips: [],
+  updates: [],
+  pendingSync: [],
   selectedAdminDriver: null,
-  reportTripId: null
+  reportTripId: null,
+  listeners: []
 };
 
 /* ============================================================
@@ -39,7 +40,7 @@ const nowDate = () => {
   const d = new Date();
   const days = ['الأحد','الإثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
   const dayName = days[d.getDay()];
-  const date = d.toLocaleDateString('en-GB'); // dd/mm/yyyy
+  const date = d.toLocaleDateString('en-GB');
   const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
   return { dayName, date, time, iso: d.toISOString() };
 };
@@ -76,7 +77,7 @@ const store = {
 };
 
 /* ============================================================
-   إعداد السواقين (قابل للتعديل من المشرف)
+   إعداد السواقين
    ============================================================ */
 function getDrivers() {
   const overrides = store.get(STORAGE.DRIVERS, {});
@@ -121,7 +122,9 @@ function saveTrips() {
 }
 
 function getDriverTrips(driverId) {
-  return state.trips.filter(t => t.driverId === driverId).sort((a,b) => (a.tripNumber||0) - (b.tripNumber||0));
+  return state.trips
+    .filter(t => t.driverId === driverId)
+    .sort((a,b) => (a.tripNumber||0) - (b.tripNumber||0));
 }
 
 function getActiveTrip(driverId) {
@@ -133,7 +136,7 @@ function nextTripNumber(driverId) {
   return trips.length + 1;
 }
 
-function startNewTrip() {
+async function startNewTrip() {
   const driverId = state.user.id;
   if (getActiveTrip(driverId)) {
     toast('لديك حملة نشطة بالفعل', 'err');
@@ -157,6 +160,12 @@ function startNewTrip() {
   };
   state.trips.push(trip);
   saveTrips();
+
+  // ⭐ مزامنة فورية مع Firebase
+  const ok = await fbPushTrip(trip);
+  trip.synced = ok;
+  saveTrips();
+
   queueSync('trip_start', { tripId: trip.id });
   openTripScreen(trip.id);
 }
@@ -175,27 +184,25 @@ function openTripScreen(tripId) {
    ============================================================ */
 function computeTripBalance(trip) {
   let income = 0, expense = 0;
-  for (const t of trip.transactions) {
+  for (const t of trip.transactions || []) {
     if (t.kind === 'income') income += Number(t.amount);
     else if (t.kind === 'expense') expense += Number(t.amount);
   }
-  // خصم مستحق السواق تلقائياً
   const due = Number(trip.duePerTrip || 0);
   const totalExpense = expense + due;
-  const diff = income - totalExpense; // موجب = متبقي له ، سالب = متبقي عليه
+  const diff = income - totalExpense;
   return { income, expense, due, totalExpense, diff };
 }
 
 function computeDriverOverallBalance(driverId) {
   const trips = getDriverTrips(driverId);
-  let balance = 0; // موجب = له ، سالب = عليه
+  let balance = 0;
   for (const t of trips) {
     if (t.status === 'finished') {
       const b = computeTripBalance(t);
       balance += b.diff;
     }
   }
-  // إضافات/خصومات المشرف
   const updates = state.updates.filter(u => u.driverId === driverId);
   for (const u of updates) {
     balance += Number(u.delta || 0);
@@ -226,7 +233,7 @@ function renderTripScreen() {
 function renderTransactions() {
   const trip = state.currentTrip;
   const list = $('transactionsList');
-  if (!trip || !trip.transactions.length) {
+  if (!trip || !trip.transactions || !trip.transactions.length) {
     list.innerHTML = '<div class="empty-state">لا توجد حركات بعد</div>';
     return;
   }
@@ -238,9 +245,7 @@ function renderTransactions() {
     const sign = tx.kind === 'income' ? '+' : '-';
     const amountClass = tx.kind === 'income' ? 'income' : 'expense';
 
-    let actions = `
-      <button class="btn-del" data-act="del" data-id="${tx.id}">حذف</button>
-    `;
+    let actions = `<button class="btn-del" data-act="del" data-id="${tx.id}">حذف</button>`;
     if (tx.kind === 'expense' && tx.imageUrl) {
       actions += `<button class="btn-view" data-act="view" data-id="${tx.id}">معاينة</button>`;
     }
@@ -274,12 +279,15 @@ function renderTransactions() {
   });
 }
 
-function deleteTransaction(txId) {
+async function deleteTransaction(txId) {
   if (!confirm('تأكيد حذف الحركة؟')) return;
   const trip = state.currentTrip;
   trip.transactions = trip.transactions.filter(t => t.id !== txId);
   saveTrips();
   renderTripScreen();
+
+  // ⭐ مزامنة فورية
+  await fbPushTrip(trip);
   queueSync('trip_update', { tripId: trip.id });
   toast('تم الحذف', 'ok');
 }
@@ -302,7 +310,7 @@ function openIncomeModal() {
   $('incomeModal').classList.remove('hidden');
 }
 
-function confirmIncome() {
+async function confirmIncome() {
   const from = $('incomeFrom').value.trim();
   const amount = Number($('incomeAmount').value);
   const payType = document.querySelector('input[name="incomeType"]:checked').value;
@@ -323,6 +331,9 @@ function confirmIncome() {
   saveTrips();
   $('incomeModal').classList.add('hidden');
   renderTripScreen();
+
+  // ⭐ مزامنة فورية
+  await fbPushTrip(state.currentTrip);
   queueSync('transaction_add', { tripId: state.currentTrip.id, txId: tx.id });
   toast('تمت إضافة العهدة', 'ok');
 }
@@ -350,7 +361,7 @@ function handleExpenseImage(e) {
   reader.readAsDataURL(file);
 }
 
-function confirmExpense() {
+async function confirmExpense() {
   const amount = Number($('expenseAmount').value);
   const note = $('expenseNote').value.trim();
 
@@ -371,6 +382,9 @@ function confirmExpense() {
   state._pendingExpenseImage = null;
   $('expenseModal').classList.add('hidden');
   renderTripScreen();
+
+  // ⭐ مزامنة فورية
+  await fbPushTrip(state.currentTrip);
   queueSync('transaction_add', { tripId: state.currentTrip.id, txId: tx.id });
   toast('تمت إضافة الخرج', 'ok');
 }
@@ -413,13 +427,13 @@ async function confirmFinish() {
 
   $('finishModal').classList.add('hidden');
 
-  // توليد التقرير
-  const report = buildTripReport(trip);
+  // ⭐ مزامنة فورية مع Firebase
+  await fbPushTrip(trip);
 
-  // إرسال للسيرفر (fire & forget - المزامنة تتم في الخلفية)
+  // إرسال للسيرفر (تلجرام)
   queueSync('trip_finish', { tripId: trip.id });
 
-  // إظهار شاشة التقرير
+  const report = buildTripReport(trip);
   showReport(report);
 }
 
@@ -429,8 +443,8 @@ async function confirmFinish() {
 function buildTripReport(trip) {
   const driver = state.drivers[trip.driverId];
   const b = computeTripBalance(trip);
-  const incomeTx = trip.transactions.filter(t => t.kind === 'income');
-  const expenseTx = trip.transactions.filter(t => t.kind === 'expense');
+  const incomeTx = (trip.transactions || []).filter(t => t.kind === 'income');
+  const expenseTx = (trip.transactions || []).filter(t => t.kind === 'expense');
 
   return {
     trip,
@@ -443,7 +457,7 @@ function buildTripReport(trip) {
       diff: b.diff,
       incomeCount: incomeTx.length,
       expenseCount: expenseTx.length,
-      txCount: trip.transactions.length
+      txCount: (trip.transactions || []).length
     }
   };
 }
@@ -452,7 +466,7 @@ function showReport(report) {
   const { trip, driver, summary } = report;
   const body = $('reportBody');
 
-  const rowsHtml = trip.transactions.map((t, i) => `
+  const rowsHtml = (trip.transactions || []).map((t, i) => `
     <tr>
       <td>${i + 1}</td>
       <td>${t.kind === 'income' ? 'استلام عهدة' : 'خرج'}</td>
@@ -472,7 +486,7 @@ function showReport(report) {
       <div><b>السائق:</b> ${driver.name}</div>
       <div><b>القاطرة:</b> ${driver.trailer}</div>
       <div><b>البدء:</b> ${trip.startDay} ${trip.startDate} - ${trip.startTime}</div>
-      <div><b>الانتهاء:</b> ${trip.endDay} ${trip.endDate} - ${trip.endTime}</div>
+      <div><b>الانتهاء:</b> ${trip.endDay || ''} ${trip.endDate || ''} - ${trip.endTime || ''}</div>
       ${trip.finishInfo ? `
         <div><b>المورد:</b> ${trip.finishInfo.supplier} (${trip.finishInfo.supplierRegion})</div>
         <div><b>التاجر:</b> ${trip.finishInfo.merchant} (${trip.finishInfo.merchantRegion})</div>
@@ -508,14 +522,13 @@ function generatePDF(trip) {
   const driver = state.drivers[trip.driverId];
   const b = computeTripBalance(trip);
 
-  // محاولة استخدام خط عربي افتراضي (النص العربي قد لا يظهر بدون خط مخصص)
   doc.setFontSize(16);
   doc.text(`Trip Report #${trip.tripNumber}`, 105, 15, { align: 'center' });
   doc.setFontSize(11);
   doc.text(`Driver: ${driver.name} (${driver.trailer})`, 105, 23, { align: 'center' });
   doc.text(`Start: ${trip.startDate} ${trip.startTime}  |  End: ${trip.endDate||''} ${trip.endTime||''}`, 105, 29, { align: 'center' });
 
-  const rows = trip.transactions.map((t, i) => [
+  const rows = (trip.transactions || []).map((t, i) => [
     i + 1,
     t.kind === 'income' ? 'Income' : 'Expense',
     String(t.amount),
@@ -589,57 +602,65 @@ async function trySync() {
   updateSyncIndicator();
 }
 
-function markSynced(item) {
+async function markSynced(item) {
   const { action, payload } = item;
   if (action === 'trip_start' || action === 'trip_finish' || action === 'trip_update') {
     const trip = state.trips.find(t => t.id === payload.tripId);
-    if (trip) { trip.synced = true; saveTrips(); }
+    if (trip) {
+      trip.synced = true;
+      saveTrips();
+      await fbPushTrip(trip);
+    }
   }
-  // push إلى Firebase (يعمل عبر الإنترنت فقط)
-  pushToFirebase(item).catch(()=>{});
 }
 
 async function sendToServer(item) {
   const { action, payload } = item;
   const trip = payload.tripId ? state.trips.find(t => t.id === payload.tripId) : null;
 
-  if (action === 'trip_finish' && trip) {
-    // رفع تقرير PDF
-    const doc = generatePDF(trip);
-    const blob = doc.output('blob');
-    const fd = new FormData();
-    fd.append('file', blob, `Trip_${trip.tripNumber}.pdf`);
-    fd.append('caption', buildCaption(trip));
-
-    const res = await fetch(`${SERVER_URL}/api/upload-report`, { method: 'POST', body: fd });
-    if (!res.ok) throw new Error('report upload failed');
-    return res.json();
-  }
-
-  if (action === 'transaction_add' && trip) {
-    const tx = trip.transactions.find(t => t.id === payload.txId);
-    if (!tx) return;
-    // لو في صورة، نرفعها أولاً
-    if (tx.kind === 'expense' && tx.imageUrl && tx.imageUrl.startsWith('data:')) {
-      const blob = dataURLtoBlob(tx.imageUrl);
-      const fd = new FormData();
-      fd.append('file', blob, `tx_${tx.id}.jpg`);
-      fd.append('caption', `📸 توثيق خرج - ${state.drivers[trip.driverId].name} - حملة ${trip.tripNumber}`);
-      const res = await fetch(`${SERVER_URL}/api/upload-to-telegram`, { method: 'POST', body: fd });
-      if (res.ok) {
-        const data = await res.json();
-        tx.imageUrl = data.permanentLink || tx.imageUrl;
-        saveTrips();
-      }
-    }
-    // إرسال رسالة نصية عن الحركة
-    await sendTextToServer(buildTxCaption(trip, tx));
-    return;
-  }
-
-  // رسالة عامة
+  // 1. مزامنة Firebase فوراً
   if (trip) {
-    await sendTextToServer(buildTripCaption(trip, action));
+    try { await fbPushTrip(trip); } catch (e) {}
+  }
+
+  // 2. مزامنة تلجرام عبر السيرفر
+  try {
+    if (action === 'trip_finish' && trip) {
+      const doc = generatePDF(trip);
+      const blob = doc.output('blob');
+      const fd = new FormData();
+      fd.append('file', blob, `Trip_${trip.tripNumber}.pdf`);
+      fd.append('caption', buildCaption(trip));
+      const res = await fetch(`${SERVER_URL}/api/upload-report`, { method: 'POST', body: fd });
+      if (!res.ok) throw new Error('report upload failed');
+      return res.json();
+    }
+
+    if (action === 'transaction_add' && trip) {
+      const tx = trip.transactions.find(t => t.id === payload.txId);
+      if (!tx) return;
+      if (tx.kind === 'expense' && tx.imageUrl && tx.imageUrl.startsWith('data:')) {
+        const blob = dataURLtoBlob(tx.imageUrl);
+        const fd = new FormData();
+        fd.append('file', blob, `tx_${tx.id}.jpg`);
+        fd.append('caption', `📸 توثيق خرج - ${state.drivers[trip.driverId].name} - حملة ${trip.tripNumber}`);
+        const res = await fetch(`${SERVER_URL}/api/upload-to-telegram`, { method: 'POST', body: fd });
+        if (res.ok) {
+          const data = await res.json();
+          tx.imageUrl = data.permanentLink || tx.imageUrl;
+          saveTrips();
+          await fbPushTrip(trip);
+        }
+      }
+      await sendTextToServer(buildTxCaption(trip, tx));
+      return;
+    }
+
+    if (trip) {
+      await sendTextToServer(buildTripCaption(trip, action));
+    }
+  } catch (e) {
+    console.warn('Telegram sync failed (non-blocking):', e);
   }
 }
 
@@ -693,30 +714,6 @@ function dataURLtoBlob(dataURL) {
 }
 
 /* ============================================================
-   Firebase Push
-   ============================================================ */
-async function pushToFirebase(item) {
-  if (!state.online) return;
-  try {
-    const ref = db.ref('sync_log');
-    await ref.push({
-      action: item.action,
-      payload: item.payload,
-      user: state.user?.id || 'unknown',
-      ts: Date.now()
-    });
-    // تحديث رصيد السائق في Firebase
-    if (state.user?.role === 'driver') {
-      const bal = computeDriverOverallBalance(state.user.id);
-      await db.ref(`balances/${state.user.id}`).set({
-        balance: bal,
-        updatedAt: Date.now()
-      });
-    }
-  } catch (e) { /* ignore */ }
-}
-
-/* ============================================================
    مؤشر المزامنة
    ============================================================ */
 function updateSyncIndicator() {
@@ -746,6 +743,7 @@ function updateSyncIndicator() {
 function renderDriverHome() {
   const u = state.user;
   const d = state.drivers[u.id];
+  if (!d) return;
   $('dName').textContent = d.name;
   $('dPhone').textContent = '📞 ' + d.phone;
   $('dTrailer').textContent = '🚛 ' + d.trailer;
@@ -778,7 +776,7 @@ function renderHistory() {
       <div class="hc-grid">
         <div>البدء: <b>${trip.startDate} ${trip.startTime}</b></div>
         <div>الانتهاء: <b>${trip.endDate ? trip.endDate + ' ' + trip.endTime : '—'}</b></div>
-        <div>عدد الحركات: <b>${trip.transactions.length}</b></div>
+        <div>عدد الحركات: <b>${(trip.transactions||[]).length}</b></div>
         <div>العُهد: <b>${fmtMoney(b.income)}</b></div>
       </div>
       <div class="hc-balance">
@@ -861,9 +859,8 @@ function renderAdminHome() {
     grid.appendChild(row);
   });
 
-  // النشاطات
   const act = $('adminActivityList');
-  const all = state.updates.sort((a,b) => b.ts - a.ts).slice(0, 20);
+  const all = [...state.updates].sort((a,b) => b.ts - a.ts).slice(0, 20);
   if (!all.length) {
     act.innerHTML = '<div class="empty-state">لا توجد نشاطات</div>';
   } else {
@@ -900,12 +897,10 @@ function openAdminDriver(driverId) {
   el.className = 'balance-value ' + (bal >= 0 ? 'positive' : 'negative');
   $('adBalanceStatus').textContent = bal >= 0 ? 'متبقي له' : 'متبقي عليه';
 
-  // آخر مزامنة
   const trips = getDriverTrips(driverId);
-  const lastTrip = trips.sort((a,b) => new Date(b.startISO) - new Date(a.startISO))[0];
+  const lastTrip = trips.slice().sort((a,b) => new Date(b.startISO) - new Date(a.startISO))[0];
   $('adLastSync').textContent = lastTrip ? 'آخر نشاط: ' + fmtDateTime(lastTrip.startISO) : 'آخر نشاط: —';
 
-  // حملات السائق
   const list = $('adminTripsList');
   if (!trips.length) {
     list.innerHTML = '<div class="empty-state">لا توجد حملات</div>';
@@ -924,7 +919,7 @@ function openAdminDriver(driverId) {
         <div class="hc-grid">
           <div>البدء: <b>${trip.startDate} ${trip.startTime}</b></div>
           <div>الانتهاء: <b>${trip.endDate ? trip.endDate + ' ' + trip.endTime : '—'}</b></div>
-          <div>عدد الحركات: <b>${trip.transactions.length}</b></div>
+          <div>عدد الحركات: <b>${(trip.transactions||[]).length}</b></div>
           <div>${trip.synced ? '✅ متزامنة' : '⏳ معلقة'}</div>
         </div>
         <div class="hc-balance">
@@ -959,13 +954,19 @@ function openEditDriverModal() {
   $('editDriverModal').classList.remove('hidden');
 }
 
-function confirmEditDriver() {
+async function confirmEditDriver() {
   const name = $('editDriverName').value.trim();
   const trailer = $('editDriverTrailer').value.trim();
   const due = Number($('editDriverDue').value) || 50000;
   if (!name || !trailer) return toast('أكمل الحقول', 'err');
 
-  saveDriverOverride(state.selectedAdminDriver, { name, trailer, duePerTrip: due });
+  const patch = { name, trailer, duePerTrip: due };
+  saveDriverOverride(state.selectedAdminDriver, patch);
+
+  // ⭐ مزامنة فورية مع Firebase
+  const ok = await fbPushDriverOverride(state.selectedAdminDriver, patch);
+  if (!ok) toast('فشل المزامنة', 'err');
+
   $('editDriverModal').classList.add('hidden');
   toast('تم حفظ الإعدادات', 'ok');
   openAdminDriver(state.selectedAdminDriver);
@@ -979,7 +980,7 @@ function openSettleModal(isDeduct) {
   $('settleModal').classList.remove('hidden');
 }
 
-function confirmSettle() {
+async function confirmSettle() {
   const amount = Number($('settleAmount').value);
   const note = $('settleNote').value.trim();
   if (!amount || amount <= 0) return toast('أدخل مبلغاً صحيحاً', 'err');
@@ -993,13 +994,18 @@ function confirmSettle() {
     note: note || (delta > 0 ? 'إضافة رصيد' : 'خصم رصيد'),
     ts: Date.now()
   };
+
   state.updates.push(update);
   store.set(STORAGE.UPDATES, state.updates);
+
+  // ⭐ مزامنة فورية مع Firebase
+  const ok = await fbPushUpdate(update);
+  if (!ok) toast('فشل المزامنة', 'err');
+
   $('settleModal').classList.add('hidden');
   toast('تم تنفيذ التسوية', 'ok');
   openAdminDriver(state.selectedAdminDriver);
 
-  // إرسال تحديث للمشرف عبر السيرفر (اختياري)
   sendTextToServer(
     `⚙️ <b>${delta>0?'إضافة':'خصم'} رصيد</b>\n` +
     `👤 السائق: ${state.drivers[state.selectedAdminDriver].name}\n` +
@@ -1035,6 +1041,10 @@ function doLogin() {
 }
 
 function afterLogin() {
+  // إلغاء أي مستمعين سابقين
+  state.listeners.forEach(unsub => { try { unsub(); } catch(e){} });
+  state.listeners = [];
+
   if (state.user.role === 'driver') {
     renderDriverHome();
     const active = getActiveTrip(state.user.id);
@@ -1044,9 +1054,78 @@ function afterLogin() {
     } else {
       show('driverScreen');
     }
+
+    // ⭐ استمع لتحديثات المشرف على هذا السائق
+    const unsub1 = fbListenDriverUpdates(state.user.id, (updates) => {
+      state.updates = updates;
+      store.set(STORAGE.UPDATES, updates);
+      renderDriverHome();
+      if (state.currentTrip) renderTripScreen();
+    });
+    state.listeners.push(unsub1);
+
+    // ⭐ استمع لتعديلات المشرف على بيانات السائق
+    const unsub2 = fbListenDriverOverride(state.user.id, (override) => {
+      if (override && Object.keys(override).length) {
+        saveDriverOverride(state.user.id, override);
+        renderDriverHome();
+        if (state.currentTrip) renderTripScreen();
+      }
+    });
+    state.listeners.push(unsub2);
+
   } else {
     show('adminScreen');
     renderAdminHome();
+
+    // ⭐ استمع لكل حملات كل السواقين
+    const unsub1 = fbListenAllDrivers((allTrips) => {
+      const firebaseTrips = [];
+      for (const driverId in allTrips) {
+        const driverTrips = allTrips[driverId];
+        for (const tripId in driverTrips) {
+          firebaseTrips.push(driverTrips[tripId]);
+        }
+      }
+      // ادمج: احتفظ بحملات المشرف المحلية + استبدل حملات السواقين من Firebase
+      const localAdminTrips = state.trips.filter(t => t.driverId === 'admin');
+      const localDriverTrips = state.trips.filter(t => t.driverId !== 'admin');
+
+      // دمج ذكي: احتفظ بالحملات المحلية للسواقين (قد تحتوي تعديلات لم تُرفع بعد) + أضف الجديدة من Firebase
+      const mergedMap = new Map();
+      localDriverTrips.forEach(t => mergedMap.set(t.id, t));
+      firebaseTrips.forEach(t => {
+        // Firebase هي المصدر الرسمي إذا كانت أحدث
+        mergedMap.set(t.id, t);
+      });
+
+      state.trips = [...localAdminTrips, ...Array.from(mergedMap.values())];
+      saveTrips();
+      renderAdminHome();
+      if (state.selectedAdminDriver) {
+        openAdminDriver(state.selectedAdminDriver);
+      }
+    });
+    state.listeners.push(unsub1);
+
+    // ⭐ استمع لكل التحديثات
+    const unsub2 = fbListenAllUpdates((allUpdates) => {
+      state.updates = allUpdates;
+      store.set(STORAGE.UPDATES, allUpdates);
+      renderAdminHome();
+      if (state.selectedAdminDriver) {
+        openAdminDriver(state.selectedAdminDriver);
+      }
+    });
+    state.listeners.push(unsub2);
+
+    // ⭐ استمع لتعديلات السواقين
+    const unsub3 = fbListenAllOverrides((data) => {
+      store.set(STORAGE.DRIVERS, data || {});
+      getDrivers();
+      renderAdminHome();
+    });
+    state.listeners.push(unsub3);
   }
   updateSyncIndicator();
 }
@@ -1056,6 +1135,8 @@ function logout() {
   store.remove(STORAGE.SESSION);
   state.user = null;
   state.currentTrip = null;
+  state.listeners.forEach(unsub => { try { unsub(); } catch(e){} });
+  state.listeners = [];
   show('loginScreen');
   $('loginPassword').value = '';
 }
@@ -1077,13 +1158,8 @@ function bindEvents() {
   $('updatesBack').onclick = () => show('driverScreen');
 
   $('tripBack').onclick = () => {
-    if (state.currentTrip && state.currentTrip.status === 'ongoing') {
-      show('driverScreen');
-      renderDriverHome();
-    } else {
-      show('driverScreen');
-      renderDriverHome();
-    }
+    show('driverScreen');
+    renderDriverHome();
   };
 
   $('btnAddIncome').onclick = openIncomeModal;
@@ -1126,7 +1202,6 @@ function bindEvents() {
     toast('انقطع الاتصال، سيتم المزامنة لاحقاً', 'err');
   });
 
-  // إغلاق المودالات عند الضغط على الخلفية
   document.querySelectorAll('.modal').forEach(m => {
     m.addEventListener('click', e => {
       if (e.target === m && !m.classList.contains('modal-image')) {
