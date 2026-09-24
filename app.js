@@ -25,7 +25,9 @@ const state = {
   pendingSync: [],
   selectedAdminDriver: null,
   reportTripId: null,
-  listeners: []
+  listeners: [],
+  editingTxId: null,
+  editingModal: null // 'income' | 'expense'
 };
 
 /* ============================================================
@@ -161,7 +163,6 @@ async function startNewTrip() {
   state.trips.push(trip);
   saveTrips();
 
-  // ⭐ مزامنة فورية مع Firebase
   const ok = await fbPushTrip(trip);
   trip.synced = ok;
   saveTrips();
@@ -180,8 +181,15 @@ function openTripScreen(tripId) {
 }
 
 /* ============================================================
-   حساب الأرصدة
-   ============================================================ */
+   حساب الأرصدة - ✅ تصحيح المنطق
+   ============================================================
+   القاعدة:
+     المطلوب = المخارج + مستحق السواق
+     الفارق = العُهد - المطلوب
+     - إذا الفارق موجب (العُهد أكبر) ⇒ متبقي عليه (بالأحمر)
+     - إذا الفارق سالب (المخارج أكبر) ⇒ متبقي له (بالأخضر)
+     - إذا صفر ⇒ مُسوَّى
+*/
 function computeTripBalance(trip) {
   let income = 0, expense = 0;
   for (const t of trip.transactions || []) {
@@ -189,14 +197,14 @@ function computeTripBalance(trip) {
     else if (t.kind === 'expense') expense += Number(t.amount);
   }
   const due = Number(trip.duePerTrip || 0);
-  const totalExpense = expense + due;
-  const diff = income - totalExpense;
-  return { income, expense, due, totalExpense, diff };
+  const required = expense + due;          // المطلوب من السواق
+  const diff = income - required;          // موجب = عليه، سالب = له
+  return { income, expense, due, required, diff };
 }
 
 function computeDriverOverallBalance(driverId) {
   const trips = getDriverTrips(driverId);
-  let balance = 0;
+  let balance = 0; // موجب = عليه، سالب = له
   for (const t of trips) {
     if (t.status === 'finished') {
       const b = computeTripBalance(t);
@@ -210,6 +218,13 @@ function computeDriverOverallBalance(driverId) {
   return balance;
 }
 
+// دالة مساعدة للعرض: ترجع نص + كلاس
+function balanceLabel(diff) {
+  if (diff > 0) return { text: `متبقي عليه ${fmtMoney(diff)}`, cls: 'pos' };     // أحمر
+  if (diff < 0) return { text: `متبقي له ${fmtMoney(Math.abs(diff))}`, cls: 'neg' }; // أخضر
+  return { text: 'مُسوَّى', cls: '' };
+}
+
 /* ============================================================
    عرض شاشة الحملة
    ============================================================ */
@@ -221,10 +236,13 @@ function renderTripScreen() {
 
   const b = computeTripBalance(trip);
   $('tripTotalIncome').textContent = fmtMoney(b.income);
-  $('tripTotalExpense').textContent = fmtMoney(b.totalExpense);
-  const dueEl = $('tripDue');
-  dueEl.textContent = fmtMoney(Math.abs(b.diff));
-  dueEl.className = b.diff >= 0 ? 'txt-green' : 'txt-red';
+  $('tripTotalExpense').textContent = fmtMoney(b.expense);
+  $('tripDue').textContent = fmtMoney(b.due);
+
+  const resultEl = $('tripResult');
+  const r = balanceLabel(b.diff);
+  resultEl.textContent = r.text;
+  resultEl.className = r.cls;
 
   renderTransactions();
   updateSyncIndicator();
@@ -245,9 +263,12 @@ function renderTransactions() {
     const sign = tx.kind === 'income' ? '+' : '-';
     const amountClass = tx.kind === 'income' ? 'income' : 'expense';
 
-    let actions = `<button class="btn-del" data-act="del" data-id="${tx.id}">حذف</button>`;
+    let actions = `
+      <button class="btn-edit" data-act="edit" data-id="${tx.id}">✏️ تعديل</button>
+      <button class="btn-del" data-act="del" data-id="${tx.id}">🗑️ حذف</button>
+    `;
     if (tx.kind === 'expense' && tx.imageUrl) {
-      actions += `<button class="btn-view" data-act="view" data-id="${tx.id}">معاينة</button>`;
+      actions += `<button class="btn-view" data-act="view" data-id="${tx.id}">👁️ معاينة</button>`;
     }
 
     item.innerHTML = `
@@ -274,6 +295,7 @@ function renderTransactions() {
       const act = btn.dataset.act;
       const id = btn.dataset.id;
       if (act === 'del') deleteTransaction(id);
+      if (act === 'edit') editTransaction(id);
       if (act === 'view') viewTransactionImage(id);
     };
   });
@@ -286,7 +308,6 @@ async function deleteTransaction(txId) {
   saveTrips();
   renderTripScreen();
 
-  // ⭐ مزامنة فورية
   await fbPushTrip(trip);
   queueSync('trip_update', { tripId: trip.id });
   toast('تم الحذف', 'ok');
@@ -301,9 +322,48 @@ function viewTransactionImage(txId) {
 }
 
 /* ============================================================
-   إضافة حركات
+   ✅ تعديل حركة موجودة
+   ============================================================ */
+function editTransaction(txId) {
+  const trip = state.currentTrip;
+  const tx = trip.transactions.find(t => t.id === txId);
+  if (!tx) return;
+
+  state.editingTxId = txId;
+
+  if (tx.kind === 'income') {
+    state.editingModal = 'income';
+    $('incomeHeader').textContent = 'تعديل عهدة';
+    $('incomeFrom').value = tx.from || '';
+    $('incomeAmount').value = tx.amount || '';
+    const typeRadio = document.querySelector(`input[name="incomeType"][value="${tx.payType || 'نقدا'}"]`);
+    if (typeRadio) typeRadio.checked = true;
+    $('incomeModal').classList.remove('hidden');
+  } else {
+    state.editingModal = 'expense';
+    $('expenseHeader').textContent = 'تعديل خرج';
+    $('expenseAmount').value = tx.amount || '';
+    $('expenseNote').value = tx.note || '';
+    $('expenseImage').value = '';
+    $('expensePreview').classList.add('hidden');
+    $('expensePreview').innerHTML = '';
+    state._pendingExpenseImage = tx.imageUrl && tx.imageUrl.startsWith('data:') ? tx.imageUrl : null;
+    if (tx.imageUrl) {
+      const prev = $('expensePreview');
+      prev.classList.remove('hidden');
+      prev.innerHTML = `<img src="${tx.imageUrl}" alt="preview" />`;
+    }
+    $('expenseModal').classList.remove('hidden');
+  }
+}
+
+/* ============================================================
+   استلام عهدة (إضافة/تعديل)
    ============================================================ */
 function openIncomeModal() {
+  state.editingTxId = null;
+  state.editingModal = 'income';
+  $('incomeHeader').textContent = 'استلام عهدة';
   $('incomeFrom').value = '';
   $('incomeAmount').value = '';
   document.querySelector('input[name="incomeType"][value="نقدا"]').checked = true;
@@ -318,27 +378,50 @@ async function confirmIncome() {
   if (!from) return toast('أدخل اسم المسلم', 'err');
   if (!amount || amount <= 0) return toast('أدخل مبلغاً صحيحاً', 'err');
 
-  const now = nowDate();
-  const tx = {
-    id: uid(),
-    kind: 'income',
-    from,
-    amount,
-    payType,
-    day: now.dayName, date: now.date, time: now.time, iso: now.iso
-  };
-  state.currentTrip.transactions.push(tx);
+  const trip = state.currentTrip;
+
+  if (state.editingTxId) {
+    // تعديل
+    const tx = trip.transactions.find(t => t.id === state.editingTxId);
+    if (tx) {
+      tx.from = from;
+      tx.amount = amount;
+      tx.payType = payType;
+      tx.editedAt = new Date().toISOString();
+    }
+    toast('تم تعديل العهدة', 'ok');
+  } else {
+    // إضافة
+    const now = nowDate();
+    const tx = {
+      id: uid(),
+      kind: 'income',
+      from,
+      amount,
+      payType,
+      day: now.dayName, date: now.date, time: now.time, iso: now.iso
+    };
+    trip.transactions.push(tx);
+    toast('تمت إضافة العهدة', 'ok');
+  }
+
   saveTrips();
   $('incomeModal').classList.add('hidden');
+  state.editingTxId = null;
+  state.editingModal = null;
   renderTripScreen();
 
-  // ⭐ مزامنة فورية
-  await fbPushTrip(state.currentTrip);
-  queueSync('transaction_add', { tripId: state.currentTrip.id, txId: tx.id });
-  toast('تمت إضافة العهدة', 'ok');
+  await fbPushTrip(trip);
+  queueSync('trip_update', { tripId: trip.id });
 }
 
+/* ============================================================
+   إدراج خرج (إضافة/تعديل)
+   ============================================================ */
 function openExpenseModal() {
+  state.editingTxId = null;
+  state.editingModal = 'expense';
+  $('expenseHeader').textContent = 'إدراج خرج';
   $('expenseAmount').value = '';
   $('expenseNote').value = '';
   $('expenseImage').value = '';
@@ -368,25 +451,44 @@ async function confirmExpense() {
   if (!amount || amount <= 0) return toast('أدخل مبلغاً صحيحاً', 'err');
   if (!note) return toast('أدخل البيان', 'err');
 
-  const now = nowDate();
-  const tx = {
-    id: uid(),
-    kind: 'expense',
-    amount,
-    note,
-    imageUrl: state._pendingExpenseImage || null,
-    day: now.dayName, date: now.date, time: now.time, iso: now.iso
-  };
-  state.currentTrip.transactions.push(tx);
+  const trip = state.currentTrip;
+
+  if (state.editingTxId) {
+    // تعديل
+    const tx = trip.transactions.find(t => t.id === state.editingTxId);
+    if (tx) {
+      tx.amount = amount;
+      tx.note = note;
+      if (state._pendingExpenseImage !== null) {
+        tx.imageUrl = state._pendingExpenseImage;
+      }
+      tx.editedAt = new Date().toISOString();
+    }
+    toast('تم تعديل الخرج', 'ok');
+  } else {
+    // إضافة
+    const now = nowDate();
+    const tx = {
+      id: uid(),
+      kind: 'expense',
+      amount,
+      note,
+      imageUrl: state._pendingExpenseImage || null,
+      day: now.dayName, date: now.date, time: now.time, iso: now.iso
+    };
+    trip.transactions.push(tx);
+    toast('تمت إضافة الخرج', 'ok');
+  }
+
   saveTrips();
   state._pendingExpenseImage = null;
   $('expenseModal').classList.add('hidden');
+  state.editingTxId = null;
+  state.editingModal = null;
   renderTripScreen();
 
-  // ⭐ مزامنة فورية
-  await fbPushTrip(state.currentTrip);
-  queueSync('transaction_add', { tripId: state.currentTrip.id, txId: tx.id });
-  toast('تمت إضافة الخرج', 'ok');
+  await fbPushTrip(trip);
+  queueSync('trip_update', { tripId: trip.id });
 }
 
 /* ============================================================
@@ -427,10 +529,7 @@ async function confirmFinish() {
 
   $('finishModal').classList.add('hidden');
 
-  // ⭐ مزامنة فورية مع Firebase
   await fbPushTrip(trip);
-
-  // إرسال للسيرفر (تلجرام)
   queueSync('trip_finish', { tripId: trip.id });
 
   const report = buildTripReport(trip);
@@ -453,7 +552,7 @@ function buildTripReport(trip) {
       incomeTotal: b.income,
       expenseTotal: b.expense,
       due: b.due,
-      totalExpense: b.totalExpense,
+      required: b.required,
       diff: b.diff,
       incomeCount: incomeTx.length,
       expenseCount: expenseTx.length,
@@ -476,12 +575,10 @@ function showReport(report) {
     </tr>
   `).join('');
 
-  const finalText = summary.diff >= 0
-    ? `متبقي له: ${fmtMoney(summary.diff)}`
-    : `متبقي عليه: ${fmtMoney(Math.abs(summary.diff))}`;
+  const r = balanceLabel(summary.diff);
 
   body.innerHTML = `
-    <div style="margin-bottom:12px;font-size:14px;line-height:2;">
+    <div style="margin-bottom:14px;font-size:14px;line-height:2;">
       <div><b>الحملة:</b> رقم ${trip.tripNumber}</div>
       <div><b>السائق:</b> ${driver.name}</div>
       <div><b>القاطرة:</b> ${driver.trailer}</div>
@@ -503,8 +600,8 @@ function showReport(report) {
       <div><b>إجمالي العُهد:</b> ${fmtMoney(summary.incomeTotal)}</div>
       <div><b>إجمالي المخارج:</b> ${fmtMoney(summary.expenseTotal)}</div>
       <div><b>مستحق السائق (خصم تلقائي):</b> ${fmtMoney(summary.due)}</div>
-      <div><b>إجمالي الخصومات:</b> ${fmtMoney(summary.totalExpense)}</div>
-      <div style="font-size:16px;margin-top:8px;" class="${summary.diff>=0?'pos':'neg'}"><b>${finalText}</b></div>
+      <div><b>إجمالي المطلوب:</b> ${fmtMoney(summary.required)}</div>
+      <div style="font-size:16px;margin-top:8px;" class="${r.cls}"><b>${r.text}</b></div>
     </div>
   `;
 
@@ -513,44 +610,163 @@ function showReport(report) {
 }
 
 /* ============================================================
-   توليد PDF
+   توليد PDF مع دعم الخط العربي
    ============================================================ */
-function generatePDF(trip) {
+let _arabicFontBase64 = null;
+
+async function loadArabicFont() {
+  if (_arabicFontBase64) return _arabicFontBase64;
+  try {
+    // خط Amiri من CDN (base64 جاهز)
+    const res = await fetch('https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/amiri/Amiri-Regular.ttf');
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    // تحويل إلى base64
+    let binary = '';
+    const bytes = new Uint8Array(buf);
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    _arabicFontBase64 = btoa(binary);
+    return _arabicFontBase64;
+  } catch (e) {
+    console.warn('Failed to load Arabic font:', e);
+    return null;
+  }
+}
+
+async function generatePDF(trip) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
 
+  // تحميل الخط العربي
+  const fontB64 = await loadArabicFont();
+  let hasArabic = false;
+  if (fontB64) {
+    try {
+      doc.addFileToVFS('Amiri-Regular.ttf', fontB64);
+      doc.addFont('Amiri-Regular.ttf', 'Amiri', 'normal');
+      doc.setFont('Amiri');
+      hasArabic = true;
+    } catch (e) {
+      console.warn('Failed to register Arabic font:', e);
+    }
+  }
+
   const driver = state.drivers[trip.driverId];
   const b = computeTripBalance(trip);
+  const r = balanceLabel(b.diff);
 
-  doc.setFontSize(16);
-  doc.text(`Trip Report #${trip.tripNumber}`, 105, 15, { align: 'center' });
+  // ================= Header =================
+  const pageW = doc.internal.pageSize.getWidth();
+
+  // شريط علوي ملوّن
+  doc.setFillColor(21, 26, 61);
+  doc.rect(0, 0, pageW, 30, 'F');
+
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(18);
+  const title = hasArabic ? `تقرير الحملة رقم ${trip.tripNumber}` : `Trip Report #${trip.tripNumber}`;
+  doc.text(title, pageW / 2, 15, { align: 'center' });
+
   doc.setFontSize(11);
-  doc.text(`Driver: ${driver.name} (${driver.trailer})`, 105, 23, { align: 'center' });
-  doc.text(`Start: ${trip.startDate} ${trip.startTime}  |  End: ${trip.endDate||''} ${trip.endTime||''}`, 105, 29, { align: 'center' });
+  const subtitle = hasArabic ? `${driver.name} - ${driver.trailer}` : `${driver.name} (${driver.trailer})`;
+  doc.text(subtitle, pageW / 2, 24, { align: 'center' });
 
-  const rows = (trip.transactions || []).map((t, i) => [
-    i + 1,
-    t.kind === 'income' ? 'Income' : 'Expense',
+  doc.setTextColor(0, 0, 0);
+
+  // ================= معلومات عامة =================
+  let y = 40;
+  doc.setFontSize(11);
+  const dateRange = `${trip.startDate} ${trip.startTime}  →  ${trip.endDate || ''} ${trip.endTime || ''}`;
+  doc.text(hasArabic ? `الفترة: ${dateRange}` : `Period: ${dateRange}`, pageW - 14, y, { align: 'right' });
+  y += 6;
+
+  if (trip.finishInfo) {
+    doc.text(hasArabic
+      ? `المورد: ${trip.finishInfo.supplier} (${trip.finishInfo.supplierRegion})`
+      : `Supplier: ${trip.finishInfo.supplier} (${trip.finishInfo.supplierRegion})`,
+      pageW - 14, y, { align: 'right' }); y += 6;
+    doc.text(hasArabic
+      ? `التاجر: ${trip.finishInfo.merchant} (${trip.finishInfo.merchantRegion})`
+      : `Merchant: ${trip.finishInfo.merchant} (${trip.finishInfo.merchantRegion})`,
+      pageW - 14, y, { align: 'right' }); y += 6;
+    doc.text(hasArabic
+      ? `البضاعة: ${trip.finishInfo.goodsType} - ${trip.finishInfo.quantity}`
+      : `Goods: ${trip.finishInfo.goodsType} - ${trip.finishInfo.quantity}`,
+      pageW - 14, y, { align: 'right' }); y += 6;
+  }
+  y += 4;
+
+  // ================= جدول الحركات =================
+  const head = hasArabic
+    ? [['#', 'النوع', 'المبلغ', 'البيان', 'التاريخ']]
+    : [['#', 'Type', 'Amount', 'Note', 'Date']];
+
+  const body = (trip.transactions || []).map((t, i) => [
+    String(i + 1),
+    hasArabic ? (t.kind === 'income' ? 'استلام عهدة' : 'خرج') : (t.kind === 'income' ? 'Income' : 'Expense'),
     String(t.amount),
     t.kind === 'income' ? (t.from || '') : (t.note || ''),
     `${t.date} ${t.time}`
   ]);
 
   doc.autoTable({
-    startY: 36,
-    head: [['#', 'Type', 'Amount', 'Note', 'Date']],
-    body: rows.length ? rows : [['-','-','-','-','-']],
-    styles: { fontSize: 9, halign: 'center' },
-    headStyles: { fillColor: [27, 38, 59] }
+    startY: y,
+    head: head,
+    body: body.length ? body : [[ '-', '-', '-', '-', '-' ]],
+    styles: {
+      font: hasArabic ? 'Amiri' : 'helvetica',
+      fontSize: 10,
+      halign: 'center',
+      cellPadding: 3
+    },
+    headStyles: {
+      fillColor: [21, 26, 61],
+      textColor: [255, 255, 255],
+      fontStyle: 'bold'
+    },
+    alternateRowStyles: { fillColor: [245, 247, 250] },
+    theme: 'grid'
   });
 
-  let y = doc.lastAutoTable.finalY + 10;
-  doc.setFontSize(11);
-  doc.text(`Total Income: ${b.income}`, 15, y); y += 6;
-  doc.text(`Total Expense: ${b.expense}`, 15, y); y += 6;
-  doc.text(`Driver Due (auto): ${b.due}`, 15, y); y += 6;
-  doc.text(`Total Deductions: ${b.totalExpense}`, 15, y); y += 6;
-  doc.text(`Difference: ${b.diff}`, 15, y);
+  // ================= ملخص =================
+  y = doc.lastAutoTable.finalY + 12;
+  doc.setFontSize(12);
+  doc.setFont(hasArabic ? 'Amiri' : 'helvetica');
+
+  const lineH = 7;
+  const rightX = pageW - 14;
+
+  doc.setTextColor(16, 185, 129);
+  doc.text(hasArabic ? `إجمالي العُهد: ${b.income} ريال` : `Total Income: ${b.income}`, rightX, y, { align: 'right' }); y += lineH;
+
+  doc.setTextColor(239, 68, 68);
+  doc.text(hasArabic ? `إجمالي المخارج: ${b.expense} ريال` : `Total Expense: ${b.expense}`, rightX, y, { align: 'right' }); y += lineH;
+
+  doc.setTextColor(245, 158, 11);
+  doc.text(hasArabic ? `مستحق السائق (خصم تلقائي): ${b.due} ريال` : `Driver Due (auto): ${b.due}`, rightX, y, { align: 'right' }); y += lineH;
+
+  doc.setTextColor(31, 41, 55);
+  doc.text(hasArabic ? `إجمالي المطلوب: ${b.required} ريال` : `Total Required: ${b.required}`, rightX, y, { align: 'right' }); y += lineH + 4;
+
+  // النتيجة النهائية بلون
+  if (b.diff > 0) doc.setTextColor(220, 38, 38);       // أحمر = عليه
+  else if (b.diff < 0) doc.setTextColor(5, 150, 105);   // أخضر = له
+  else doc.setTextColor(100, 100, 100);
+
+  doc.setFontSize(14);
+  const finalText = hasArabic
+    ? (b.diff > 0 ? `متبقي عليه: ${b.diff} ريال` : b.diff < 0 ? `متبقي له: ${Math.abs(b.diff)} ريال` : 'مُسوَّى')
+    : (b.diff > 0 ? `Due from driver: ${b.diff}` : b.diff < 0 ? `Credit to driver: ${Math.abs(b.diff)}` : 'Settled');
+  doc.text(finalText, rightX, y, { align: 'right' });
+
+  // Footer
+  const pageH = doc.internal.pageSize.getHeight();
+  doc.setFontSize(9);
+  doc.setTextColor(150, 150, 150);
+  doc.text(hasArabic ? 'تطبيق متابعة عُهد السواقين' : 'Driver Tracking App', pageW / 2, pageH - 10, { align: 'center' });
 
   return doc;
 }
@@ -558,19 +774,18 @@ function generatePDF(trip) {
 async function downloadReportPDF() {
   const trip = state.trips.find(t => t.id === state.reportTripId);
   if (!trip) return;
-  const doc = generatePDF(trip);
+  toast('جاري تحضير التقرير...', '');
+  const doc = await generatePDF(trip);
   doc.save(`Trip_${trip.tripNumber}_${trip.driverId}.pdf`);
   toast('تم تحميل التقرير', 'ok');
 }
 
 /* ============================================================
-   نظام المزامنة (Offline-First)
+   نظام المزامنة
    ============================================================ */
 function queueSync(action, payload) {
   const item = {
-    id: uid(),
-    action,
-    payload,
+    id: uid(), action, payload,
     createdAt: new Date().toISOString(),
     tries: 0
   };
@@ -604,7 +819,7 @@ async function trySync() {
 
 async function markSynced(item) {
   const { action, payload } = item;
-  if (action === 'trip_start' || action === 'trip_finish' || action === 'trip_update') {
+  if (action.startsWith('trip_')) {
     const trip = state.trips.find(t => t.id === payload.tripId);
     if (trip) {
       trip.synced = true;
@@ -618,15 +833,13 @@ async function sendToServer(item) {
   const { action, payload } = item;
   const trip = payload.tripId ? state.trips.find(t => t.id === payload.tripId) : null;
 
-  // 1. مزامنة Firebase فوراً
   if (trip) {
     try { await fbPushTrip(trip); } catch (e) {}
   }
 
-  // 2. مزامنة تلجرام عبر السيرفر
   try {
     if (action === 'trip_finish' && trip) {
-      const doc = generatePDF(trip);
+      const doc = await generatePDF(trip);
       const blob = doc.output('blob');
       const fd = new FormData();
       fd.append('file', blob, `Trip_${trip.tripNumber}.pdf`);
@@ -660,7 +873,7 @@ async function sendToServer(item) {
       await sendTextToServer(buildTripCaption(trip, action));
     }
   } catch (e) {
-    console.warn('Telegram sync failed (non-blocking):', e);
+    console.warn('Telegram sync failed:', e);
   }
 }
 
@@ -677,6 +890,7 @@ async function sendTextToServer(text) {
 function buildCaption(trip) {
   const d = state.drivers[trip.driverId];
   const b = computeTripBalance(trip);
+  const r = balanceLabel(b.diff);
   return `📊 <b>تقرير حملة رقم ${trip.tripNumber}</b>\n` +
          `👤 السائق: ${d.name}\n` +
          `🚛 ${d.trailer}\n` +
@@ -685,7 +899,7 @@ function buildCaption(trip) {
          `💰 العُهد: ${b.income}\n` +
          `💸 المخارج: ${b.expense}\n` +
          `📉 مستحق السائق: ${b.due}\n` +
-         `📌 الفارق: ${b.diff}`;
+         `📌 النتيجة: ${r.text}`;
 }
 
 function buildTxCaption(trip, tx) {
@@ -748,11 +962,11 @@ function renderDriverHome() {
   $('dPhone').textContent = '📞 ' + d.phone;
   $('dTrailer').textContent = '🚛 ' + d.trailer;
 
-  const bal = computeDriverOverallBalance(u.id);
+  const bal = computeDriverOverallBalance(u.id); // موجب = عليه
   const el = $('dBalance');
   el.textContent = fmtMoney(Math.abs(bal));
-  el.className = 'balance-value ' + (bal >= 0 ? 'positive' : 'negative');
-  $('dBalanceStatus').textContent = bal >= 0 ? 'متبقي له' : 'متبقي عليه';
+  el.className = 'balance-value ' + (bal > 0 ? 'positive' : bal < 0 ? 'negative' : '');
+  $('dBalanceStatus').textContent = bal > 0 ? 'متبقي عليه' : bal < 0 ? 'متبقي له' : 'مُسوَّى';
 }
 
 function renderHistory() {
@@ -766,6 +980,7 @@ function renderHistory() {
   trips.slice().reverse().forEach(trip => {
     const b = computeTripBalance(trip);
     const ongoing = trip.status === 'ongoing';
+    const r = balanceLabel(b.diff);
     const card = document.createElement('div');
     card.className = 'history-card' + (ongoing ? ' active' : '');
     card.innerHTML = `
@@ -781,12 +996,10 @@ function renderHistory() {
       </div>
       <div class="hc-balance">
         <span>النتيجة:</span>
-        <span class="${b.diff >= 0 ? 'pos' : 'neg'}">
-          ${b.diff >= 0 ? 'له ' : 'عليه '}${fmtMoney(Math.abs(b.diff))}
-        </span>
+        <span class="${r.cls}">${r.text}</span>
       </div>
       <div class="tx-actions" style="margin-top:10px;">
-        <button class="btn-view" data-trip="${trip.id}">معاينة التقرير</button>
+        <button class="btn-view" data-trip="${trip.id}">👁️ معاينة التقرير</button>
         ${ongoing ? `<button data-open="${trip.id}">فتح الحملة</button>` : ''}
       </div>
     `;
@@ -841,18 +1054,18 @@ function renderAdminHome() {
   driverIds.forEach(id => {
     const d = state.drivers[id];
     if (!d) return;
-    const bal = computeDriverOverallBalance(id);
+    const bal = computeDriverOverallBalance(id); // موجب = عليه
     const row = document.createElement('div');
     row.className = 'driver-row';
+    const label = bal > 0 ? `عليه ${fmtMoney(bal)}` : bal < 0 ? `له ${fmtMoney(Math.abs(bal))}` : 'مُسوَّى';
+    const cls = bal > 0 ? 'pos' : bal < 0 ? 'neg' : '';
     row.innerHTML = `
       <div class="driver-avatar">👤</div>
       <div class="driver-info">
         <div class="driver-name">${d.name}</div>
         <div class="driver-meta">${d.trailer} • ${d.phone}</div>
       </div>
-      <div class="${bal >= 0 ? 'pos' : 'neg'}" style="font-weight:800;font-size:14px;">
-        ${bal >= 0 ? 'له ' : 'عليه '}${fmtMoney(Math.abs(bal))}
-      </div>
+      <div class="${cls}" style="font-weight:800;font-size:13px;">${label}</div>
       <div class="chev">›</div>
     `;
     row.onclick = () => openAdminDriver(id);
@@ -894,8 +1107,8 @@ function openAdminDriver(driverId) {
   const bal = computeDriverOverallBalance(driverId);
   const el = $('adBalance');
   el.textContent = fmtMoney(Math.abs(bal));
-  el.className = 'balance-value ' + (bal >= 0 ? 'positive' : 'negative');
-  $('adBalanceStatus').textContent = bal >= 0 ? 'متبقي له' : 'متبقي عليه';
+  el.className = 'balance-value ' + (bal > 0 ? 'positive' : bal < 0 ? 'negative' : '');
+  $('adBalanceStatus').textContent = bal > 0 ? 'متبقي عليه' : bal < 0 ? 'متبقي له' : 'مُسوَّى';
 
   const trips = getDriverTrips(driverId);
   const lastTrip = trips.slice().sort((a,b) => new Date(b.startISO) - new Date(a.startISO))[0];
@@ -909,6 +1122,7 @@ function openAdminDriver(driverId) {
     trips.slice().reverse().forEach(trip => {
       const b = computeTripBalance(trip);
       const ongoing = trip.status === 'ongoing';
+      const r = balanceLabel(b.diff);
       const card = document.createElement('div');
       card.className = 'history-card' + (ongoing ? ' active' : '');
       card.innerHTML = `
@@ -924,12 +1138,10 @@ function openAdminDriver(driverId) {
         </div>
         <div class="hc-balance">
           <span>النتيجة:</span>
-          <span class="${b.diff >= 0 ? 'pos' : 'neg'}">
-            ${b.diff >= 0 ? 'له ' : 'عليه '}${fmtMoney(Math.abs(b.diff))}
-          </span>
+          <span class="${r.cls}">${r.text}</span>
         </div>
         <div class="tx-actions" style="margin-top:10px;">
-          <button class="btn-view" data-trip="${trip.id}">معاينة التقرير</button>
+          <button class="btn-view" data-trip="${trip.id}">👁️ معاينة التقرير</button>
         </div>
       `;
       list.appendChild(card);
@@ -963,7 +1175,6 @@ async function confirmEditDriver() {
   const patch = { name, trailer, duePerTrip: due };
   saveDriverOverride(state.selectedAdminDriver, patch);
 
-  // ⭐ مزامنة فورية مع Firebase
   const ok = await fbPushDriverOverride(state.selectedAdminDriver, patch);
   if (!ok) toast('فشل المزامنة', 'err');
 
@@ -974,7 +1185,7 @@ async function confirmEditDriver() {
 
 function openSettleModal(isDeduct) {
   state._settleMode = isDeduct ? 'deduct' : 'add';
-  $('settleHeader').textContent = isDeduct ? 'خصم من الرصيد' : 'إضافة إلى الرصيد (تسوية)';
+  $('settleHeader').textContent = isDeduct ? 'خصم من الرصيد' : 'إضافة إلى الرصيد';
   $('settleAmount').value = '';
   $('settleNote').value = '';
   $('settleModal').classList.remove('hidden');
@@ -985,20 +1196,26 @@ async function confirmSettle() {
   const note = $('settleNote').value.trim();
   if (!amount || amount <= 0) return toast('أدخل مبلغاً صحيحاً', 'err');
 
-  const delta = state._settleMode === 'deduct' ? -amount : amount;
+  // ملاحظة:
+  // delta موجب ⇒ إضافة مبلغ للرصيد
+  //   في منطقنا "موجب = عليه" ⇒ إضافة تعني زيادة ما عليه؟
+  //   لكن تسوية المشرف تعني: خصم من المبلغ اللي عليه ⇒ delta سالب
+  // لتوضيح: المشرف يعمل "تسوية" لصالح السواق (خصم من اللي عليه) ⇒ delta سالب
+  // أو "خصم على السواق" (زيادة ما عليه) ⇒ delta موجب
+  const delta = state._settleMode === 'deduct' ? amount : -amount;
+
   const update = {
     id: uid(),
     driverId: state.selectedAdminDriver,
     type: 'settle',
     delta,
-    note: note || (delta > 0 ? 'إضافة رصيد' : 'خصم رصيد'),
+    note: note || (delta > 0 ? 'خصم على الرصيد' : 'تسوية لصالح السواق'),
     ts: Date.now()
   };
 
   state.updates.push(update);
   store.set(STORAGE.UPDATES, state.updates);
 
-  // ⭐ مزامنة فورية مع Firebase
   const ok = await fbPushUpdate(update);
   if (!ok) toast('فشل المزامنة', 'err');
 
@@ -1007,9 +1224,9 @@ async function confirmSettle() {
   openAdminDriver(state.selectedAdminDriver);
 
   sendTextToServer(
-    `⚙️ <b>${delta>0?'إضافة':'خصم'} رصيد</b>\n` +
-    `👤 السائق: ${state.drivers[state.selectedAdminDriver].name}\n` +
-    `💰 المبلغ: ${Math.abs(delta)}\n` +
+    `⚙️ <b>${state._settleMode === 'deduct' ? 'خصم على' : 'تسوية لصالح'} السواق</b>\n` +
+    `👤 ${state.drivers[state.selectedAdminDriver].name}\n` +
+    `💰 المبلغ: ${amount} ريال\n` +
     `📝 البيان: ${update.note}`
   ).catch(()=>{});
 }
@@ -1041,7 +1258,6 @@ function doLogin() {
 }
 
 function afterLogin() {
-  // إلغاء أي مستمعين سابقين
   state.listeners.forEach(unsub => { try { unsub(); } catch(e){} });
   state.listeners = [];
 
@@ -1055,7 +1271,6 @@ function afterLogin() {
       show('driverScreen');
     }
 
-    // ⭐ استمع لتحديثات المشرف على هذا السائق
     const unsub1 = fbListenDriverUpdates(state.user.id, (updates) => {
       state.updates = updates;
       store.set(STORAGE.UPDATES, updates);
@@ -1064,7 +1279,6 @@ function afterLogin() {
     });
     state.listeners.push(unsub1);
 
-    // ⭐ استمع لتعديلات المشرف على بيانات السائق
     const unsub2 = fbListenDriverOverride(state.user.id, (override) => {
       if (override && Object.keys(override).length) {
         saveDriverOverride(state.user.id, override);
@@ -1078,7 +1292,6 @@ function afterLogin() {
     show('adminScreen');
     renderAdminHome();
 
-    // ⭐ استمع لكل حملات كل السواقين
     const unsub1 = fbListenAllDrivers((allTrips) => {
       const firebaseTrips = [];
       for (const driverId in allTrips) {
@@ -1087,39 +1300,24 @@ function afterLogin() {
           firebaseTrips.push(driverTrips[tripId]);
         }
       }
-      // ادمج: احتفظ بحملات المشرف المحلية + استبدل حملات السواقين من Firebase
       const localAdminTrips = state.trips.filter(t => t.driverId === 'admin');
-      const localDriverTrips = state.trips.filter(t => t.driverId !== 'admin');
-
-      // دمج ذكي: احتفظ بالحملات المحلية للسواقين (قد تحتوي تعديلات لم تُرفع بعد) + أضف الجديدة من Firebase
       const mergedMap = new Map();
-      localDriverTrips.forEach(t => mergedMap.set(t.id, t));
-      firebaseTrips.forEach(t => {
-        // Firebase هي المصدر الرسمي إذا كانت أحدث
-        mergedMap.set(t.id, t);
-      });
-
+      firebaseTrips.forEach(t => mergedMap.set(t.id, t));
       state.trips = [...localAdminTrips, ...Array.from(mergedMap.values())];
       saveTrips();
       renderAdminHome();
-      if (state.selectedAdminDriver) {
-        openAdminDriver(state.selectedAdminDriver);
-      }
+      if (state.selectedAdminDriver) openAdminDriver(state.selectedAdminDriver);
     });
     state.listeners.push(unsub1);
 
-    // ⭐ استمع لكل التحديثات
     const unsub2 = fbListenAllUpdates((allUpdates) => {
       state.updates = allUpdates;
       store.set(STORAGE.UPDATES, allUpdates);
       renderAdminHome();
-      if (state.selectedAdminDriver) {
-        openAdminDriver(state.selectedAdminDriver);
-      }
+      if (state.selectedAdminDriver) openAdminDriver(state.selectedAdminDriver);
     });
     state.listeners.push(unsub2);
 
-    // ⭐ استمع لتعديلات السواقين
     const unsub3 = fbListenAllOverrides((data) => {
       store.set(STORAGE.DRIVERS, data || {});
       getDrivers();
@@ -1157,18 +1355,15 @@ function bindEvents() {
   $('historyBack').onclick = () => show('driverScreen');
   $('updatesBack').onclick = () => show('driverScreen');
 
-  $('tripBack').onclick = () => {
-    show('driverScreen');
-    renderDriverHome();
-  };
+  $('tripBack').onclick = () => { show('driverScreen'); renderDriverHome(); };
 
   $('btnAddIncome').onclick = openIncomeModal;
   $('incomeConfirm').onclick = confirmIncome;
-  $('incomeCancel').onclick = () => $('incomeModal').classList.add('hidden');
+  $('incomeCancel').onclick = () => { $('incomeModal').classList.add('hidden'); state.editingTxId = null; };
 
   $('btnAddExpense').onclick = openExpenseModal;
   $('expenseConfirm').onclick = confirmExpense;
-  $('expenseCancel').onclick = () => $('expenseModal').classList.add('hidden');
+  $('expenseCancel').onclick = () => { $('expenseModal').classList.add('hidden'); state.editingTxId = null; };
   $('expenseImage').onchange = handleExpenseImage;
 
   $('btnFinishTrip').onclick = openFinishModal;
@@ -1206,6 +1401,7 @@ function bindEvents() {
     m.addEventListener('click', e => {
       if (e.target === m && !m.classList.contains('modal-image')) {
         m.classList.add('hidden');
+        state.editingTxId = null;
       }
     });
   });
