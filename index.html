@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="theme-color" content="#1b263b" />
+<title>متابعة عُهد السواقين</title>
+<link rel="manifest" href="./manifest.json" />
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+
+<!-- ================= شاشة التحميل ================= -->
+<div id="splash" class="splash">
+  <div class="splash-logo">🚛</div>
+  <div class="splash-title">متابعة عُهد السواقين</div>
+  <div class="splash-loading">جاري التحميل...</div>
+</div>
+
+<!-- ================= شاشة تسجيل الدخول ================= -->
+<div id="loginScreen" class="screen hidden">
+  <div class="login-card">
+    <div class="login-logo">🚛</div>
+    <h1 class="login-title">تسجيل الدخول</h1>
+    <p class="login-subtitle">اختر الحساب وأدخل كلمة المرور</p>
+
+    <label class="field-label">الحساب</label>
+    <select id="loginUserSelect" class="input">
+      <option value="">— اختر الحساب —</option>
+      <optgroup label="السواقين">
+        <option value="driver1">هشام علي حسن الخولاني — قاطرة العاقل</option>
+        <option value="driver2">علي صالح احمد الطلقي — قاطرة فامكو</option>
+        <option value="driver3">محمد سعد علي عباد — قاطرة الزاهد</option>
+      </optgroup>
+      <optgroup label="الإدارة">
+        <option value="admin">ابو جراح الخولاني (المشرف)</option>
+      </optgroup>
+    </select>
+
+    <label class="field-label">كلمة المرور</label>
+    <input id="loginPassword" type="password" class="input" inputmode="numeric" placeholder="••••••" />
+
+    <div id="loginError" class="error-msg hidden"></div>
+
+    <button id="loginBtn" class="btn btn-primary btn-block">تسجيل الدخول</button>
+  </div>
+</div>
+
+<!-- ================= واجهة السائق ================= -->
+<div id="driverScreen" class="screen hidden">
+  <header class="topbar">
+    <div class="topbar-title">لوحة السائق</div>
+    <div class="sync-indicator" id="driverSyncDot" title="حالة المزامنة">
+      <span class="dot dot-red"></span>
+      <span class="sync-text">غير متصل</span>
+    </div>
+    <button id="driverLogout" class="logout-btn">خروج</button>
+  </header>
+
+  <div class="container">
+    <!-- بيانات السائق -->
+    <div class="card driver-info-card">
+      <div class="driver-avatar">👤</div>
+      <div class="driver-info">
+        <div class="driver-name" id="dName">—</div>
+        <div class="driver-meta" id="dPhone">—</div>
+        <div class="driver-meta" id="dTrailer">—</div>
+      </div>
+    </div>
+
+    <!-- الرصيد الحالي -->
+    <div class="card balance-card">
+      <div class="balance-label">الرصيد الحالي</div>
+      <div class="balance-value" id="dBalance">0</div>
+      <div class="balance-status" id="dBalanceStatus">لا يوجد رصيد</div>
+    </div>
+
+    <!-- الأزرار الرئيسية -->
+    <div class="actions-grid">
+      <button class="action-btn btn-start" id="btnStartTrip">
+        <span class="action-icon">🚀</span>
+        <span class="action-text">بدأ حملة جديدة</span>
+      </button>
+      <button class="action-btn btn-history" id="btnHistory">
+        <span class="action-icon">📋</span>
+        <span class="action-text">سجل الحملات</span>
+      </button>
+      <button class="action-btn btn-updates" id="btnUpdates">
+        <span class="action-icon">🔔</span>
+        <span class="action-text">تحديثات المشرف</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= شاشة الحملة النشطة ================= -->
+<div id="tripScreen" class="screen hidden">
+  <header class="topbar">
+    <div class="topbar-title" id="tripTitle">الحملة رقم 1</div>
+    <div class="sync-indicator" id="tripSyncDot">
+      <span class="dot dot-red"></span>
+      <span class="sync-text">غير متصل</span>
+    </div>
+    <button id="tripBack" class="logout-btn">رجوع</button>
+  </header>
+
+  <div class="container">
+    <!-- معلومات البدء -->
+    <div class="card trip-meta-card">
+      <div class="trip-meta-row">
+        <span>بدء الحملة:</span>
+        <span id="tripStartInfo">—</span>
+      </div>
+      <div class="trip-meta-row">
+        <span>إجمالي العُهد:</span>
+        <span id="tripTotalIncome" class="txt-green">0</span>
+      </div>
+      <div class="trip-meta-row">
+        <span>إجمالي المخارج:</span>
+        <span id="tripTotalExpense" class="txt-red">0</span>
+      </div>
+      <div class="trip-meta-row">
+        <span>المستحق لتصفية:</span>
+        <span id="tripDue">0</span>
+      </div>
+    </div>
+
+    <!-- أزرار العمليات -->
+    <div class="actions-grid">
+      <button class="action-btn btn-income" id="btnAddIncome">
+        <span class="action-icon">💰</span>
+        <span class="action-text">استلام عهدة</span>
+      </button>
+      <button class="action-btn btn-expense" id="btnAddExpense">
+        <span class="action-icon">💸</span>
+        <span class="action-text">إدراج خرج</span>
+      </button>
+      <button class="action-btn btn-finish" id="btnFinishTrip">
+        <span class="action-icon">🏁</span>
+        <span class="action-text">إنهاء الحملة</span>
+      </button>
+    </div>
+
+    <!-- قائمة الحركات -->
+    <div class="card">
+      <div class="card-header">حركات الحملة</div>
+      <div id="transactionsList" class="transactions-list">
+        <div class="empty-state">لا توجد حركات بعد</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= شاشة سجل الحملات ================= -->
+<div id="historyScreen" class="screen hidden">
+  <header class="topbar">
+    <div class="topbar-title">سجل الحملات</div>
+    <button id="historyBack" class="logout-btn">رجوع</button>
+  </header>
+  <div class="container">
+    <div id="historyList" class="history-list"></div>
+  </div>
+</div>
+
+<!-- ================= شاشة تحديثات المشرف ================= -->
+<div id="updatesScreen" class="screen hidden">
+  <header class="topbar">
+    <div class="topbar-title">تحديثات المشرف</div>
+    <button id="updatesBack" class="logout-btn">رجوع</button>
+  </header>
+  <div class="container">
+    <div id="updatesList" class="updates-list"></div>
+  </div>
+</div>
+
+<!-- ================= واجهة المشرف ================= -->
+<div id="adminScreen" class="screen hidden">
+  <header class="topbar">
+    <div class="topbar-title">لوحة المشرف</div>
+    <div class="sync-indicator" id="adminSyncDot">
+      <span class="dot dot-red"></span>
+      <span class="sync-text">غير متصل</span>
+    </div>
+    <button id="adminLogout" class="logout-btn">خروج</button>
+  </header>
+
+  <div class="container">
+    <div class="card">
+      <div class="card-header">السواقين</div>
+      <div id="driversGrid" class="drivers-grid"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">سجل النشاطات الأخيرة</div>
+      <div id="adminActivityList" class="updates-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= شاشة متابعة سائق (للمشرف) ================= -->
+<div id="adminDriverScreen" class="screen hidden">
+  <header class="topbar">
+    <div class="topbar-title" id="adminDriverTitle">متابعة السائق</div>
+    <button id="adminDriverBack" class="logout-btn">رجوع</button>
+  </header>
+
+  <div class="container">
+    <div class="card driver-info-card">
+      <div class="driver-avatar">👤</div>
+      <div class="driver-info">
+        <div class="driver-name" id="adName">—</div>
+        <div class="driver-meta" id="adPhone">—</div>
+        <div class="driver-meta" id="adTrailer">—</div>
+      </div>
+      <button id="btnEditDriver" class="btn btn-secondary btn-sm">⚙️ إعدادات</button>
+    </div>
+
+    <div class="card balance-card">
+      <div class="balance-label">الرصيد الإجمالي الحالي</div>
+      <div class="balance-value" id="adBalance">0</div>
+      <div class="balance-status" id="adBalanceStatus">لا يوجد رصيد</div>
+      <div class="driver-meta" id="adLastSync" style="margin-top:8px;">آخر مزامنة: —</div>
+    </div>
+
+    <div class="actions-grid two">
+      <button class="action-btn btn-income" id="btnSettle">
+        <span class="action-icon">➕</span>
+        <span class="action-text">تسوية / إضافة رصيد</span>
+      </button>
+      <button class="action-btn btn-expense" id="btnDeduct">
+        <span class="action-icon">➖</span>
+        <span class="action-text">خصم رصيد</span>
+      </button>
+    </div>
+
+    <div class="card">
+      <div class="card-header">حملات السائق</div>
+      <div id="adminTripsList" class="history-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= المودالات ================= -->
+
+<!-- مودال استلام عهدة -->
+<div id="incomeModal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">استلام عهدة</div>
+    <div class="modal-body">
+      <label class="field-label">استلمت عهدة من</label>
+      <input id="incomeFrom" class="input" placeholder="اسم المسلم" />
+
+      <label class="field-label">المبلغ</label>
+      <input id="incomeAmount" class="input" type="number" inputmode="numeric" placeholder="0" />
+
+      <label class="field-label">نوع العهدة</label>
+      <div class="radio-group">
+        <label class="radio-item"><input type="radio" name="incomeType" value="نقدا" checked /> نقداً</label>
+        <label class="radio-item"><input type="radio" name="incomeType" value="حوالة" /> حوالة</label>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="incomeConfirm" class="btn btn-primary">تأكيد</button>
+      <button id="incomeCancel" class="btn btn-secondary">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+<!-- مودال إدراج خرج -->
+<div id="expenseModal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">إدراج خرج</div>
+    <div class="modal-body">
+      <label class="field-label">المبلغ</label>
+      <input id="expenseAmount" class="input" type="number" inputmode="numeric" placeholder="0" />
+
+      <label class="field-label">البيان</label>
+      <textarea id="expenseNote" class="input" rows="2" placeholder="وصف الخرج"></textarea>
+
+      <label class="field-label">توثيق (اختياري)</label>
+      <input id="expenseImage" type="file" accept="image/*" class="input" />
+      <div id="expensePreview" class="img-preview hidden"></div>
+    </div>
+    <div class="modal-footer">
+      <button id="expenseConfirm" class="btn btn-primary">تأكيد</button>
+      <button id="expenseCancel" class="btn btn-secondary">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+<!-- مودال إنهاء الحملة -->
+<div id="finishModal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">إنهاء الحملة</div>
+    <div class="modal-body">
+      <label class="field-label">اسم المورد (جهة التحميل)</label>
+      <input id="finishSupplier" class="input" placeholder="اسم المورد" />
+
+      <label class="field-label">منطقة المورد</label>
+      <input id="finishSupplierRegion" class="input" placeholder="مثال: الحديدة / صنعاء / عدن" />
+
+      <label class="field-label">اسم التاجر (جهة التسليم)</label>
+      <input id="finishMerchant" class="input" placeholder="اسم التاجر" />
+
+      <label class="field-label">منطقة التاجر</label>
+      <input id="finishMerchantRegion" class="input" placeholder="مثال: صنعاء" />
+
+      <label class="field-label">نوع البضاعة</label>
+      <input id="finishGoodsType" class="input" placeholder="مثال: أسمنت / حديد" />
+
+      <label class="field-label">الكمية</label>
+      <input id="finishQuantity" class="input" placeholder="مثال: 30 طن / 500 بنال" />
+    </div>
+    <div class="modal-footer">
+      <button id="finishConfirm" class="btn btn-primary">تأكيد وإنهاء</button>
+      <button id="finishCancel" class="btn btn-secondary">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+<!-- مودال معاينة الصورة -->
+<div id="imagePreviewModal" class="modal hidden">
+  <div class="modal-content modal-image">
+    <img id="previewImage" src="" alt="معاينة" />
+    <button id="closePreview" class="btn btn-secondary btn-block">إغلاق</button>
+  </div>
+</div>
+
+<!-- مودال تعديل سائق (للمشرف) -->
+<div id="editDriverModal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">إعدادات السائق</div>
+    <div class="modal-body">
+      <label class="field-label">اسم السائق</label>
+      <input id="editDriverName" class="input" />
+
+      <label class="field-label">اسم القاطرة</label>
+      <input id="editDriverTrailer" class="input" />
+
+      <label class="field-label">المبلغ المستحق لكل حملة</label>
+      <input id="editDriverDue" class="input" type="number" inputmode="numeric" />
+
+      <p class="hint">ملاحظة: تُطبق التغييرات على الحملات الجديدة فقط.</p>
+    </div>
+    <div class="modal-footer">
+      <button id="editDriverConfirm" class="btn btn-primary">تأكيد</button>
+      <button id="editDriverCancel" class="btn btn-secondary">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+<!-- مودال تسوية رصيد -->
+<div id="settleModal" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header" id="settleHeader">تسوية الرصيد</div>
+    <div class="modal-body">
+      <label class="field-label">المبلغ</label>
+      <input id="settleAmount" class="input" type="number" inputmode="numeric" placeholder="0" />
+
+      <label class="field-label">البيان</label>
+      <input id="settleNote" class="input" placeholder="مثال: راتب شهر 7 / إكرامية" />
+    </div>
+    <div class="modal-footer">
+      <button id="settleConfirm" class="btn btn-primary">تأكيد</button>
+      <button id="settleCancel" class="btn btn-secondary">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+<!-- مودال عرض التقرير -->
+<div id="reportModal" class="modal hidden">
+  <div class="modal-content modal-wide">
+    <div class="modal-header">تقرير الحملة</div>
+    <div class="modal-body" id="reportBody"></div>
+    <div class="modal-footer">
+      <button id="reportDownload" class="btn btn-primary">تحميل PDF</button>
+      <button id="reportClose" class="btn btn-secondary">إغلاق</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= مكتبات خارجية ================= -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+
+<script src="./firebase-config.js"></script>
+<script src="./app.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').catch(()=>{});
+  }
+</script>
+</body>
+</html>
