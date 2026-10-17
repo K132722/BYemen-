@@ -74,7 +74,7 @@ async function fbPushTrip(trip) {
   }
 }
 
-// ✅ جديد: تحميل حملات سائق لمرة واحدة (one-shot)
+// تحميل حملات سائق لمرة واحدة (one-shot)
 async function fbGetDriverTripsOnce(driverId) {
   try {
     const snapshot = await db.ref(`trips/${driverId}`).once('value');
@@ -86,7 +86,7 @@ async function fbGetDriverTripsOnce(driverId) {
   }
 }
 
-// ✅ جديد: تحميل تحديثات سائق لمرة واحدة
+// تحميل تحديثات سائق لمرة واحدة
 async function fbGetDriverUpdatesOnce(driverId) {
   try {
     const snapshot = await db.ref(`updates/${driverId}`).once('value');
@@ -98,7 +98,7 @@ async function fbGetDriverUpdatesOnce(driverId) {
   }
 }
 
-// ✅ جديد: تحميل override سائق لمرة واحدة
+// تحميل override سائق لمرة واحدة
 async function fbGetDriverOverrideOnce(driverId) {
   try {
     const snapshot = await db.ref(`drivers_overrides/${driverId}`).once('value');
@@ -109,7 +109,7 @@ async function fbGetDriverOverrideOnce(driverId) {
   }
 }
 
-// ✅ جديد: تحميل كل الـ overrides لمرة واحدة
+// تحميل كل الـ overrides لمرة واحدة
 async function fbGetAllOverridesOnce() {
   try {
     const snapshot = await db.ref('drivers_overrides').once('value');
@@ -120,7 +120,7 @@ async function fbGetAllOverridesOnce() {
   }
 }
 
-// ✅ جديد: تحميل كل التحديثات لمرة واحدة
+// تحميل كل التحديثات لمرة واحدة
 async function fbGetAllUpdatesOnce() {
   try {
     const snapshot = await db.ref('updates').once('value');
@@ -138,7 +138,7 @@ async function fbGetAllUpdatesOnce() {
   }
 }
 
-// ✅ جديد: تحميل كل الحملات لمرة واحدة (للمشرف)
+// تحميل كل الحملات لمرة واحدة (للمشرف)
 async function fbGetAllTripsOnce() {
   try {
     const snapshot = await db.ref('trips').once('value');
