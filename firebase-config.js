@@ -16,7 +16,7 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
 // ============================================================
-// بيانات المستخدمين (السواقين + المشرف)
+// بيانات المستخدمين
 // ============================================================
 const USERS = {
   admin: {
@@ -58,7 +58,6 @@ const USERS = {
 // دوال المزامنة مع Firebase
 // ============================================================
 
-// رفع حملة كاملة إلى Firebase
 async function fbPushTrip(trip) {
   try {
     await db.ref(`trips/${trip.driverId}/${trip.id}`).set(trip);
@@ -66,7 +65,6 @@ async function fbPushTrip(trip) {
       lastSync: Date.now(),
       lastTripNumber: trip.tripNumber
     });
-    console.log('✅ fbPushTrip success:', trip.id);
     return true;
   } catch (e) {
     console.error('❌ fbPushTrip error:', e);
@@ -74,31 +72,26 @@ async function fbPushTrip(trip) {
   }
 }
 
-// تحميل حملات سائق لمرة واحدة (one-shot)
 async function fbGetDriverTripsOnce(driverId) {
   try {
     const snapshot = await db.ref(`trips/${driverId}`).once('value');
-    const data = snapshot.val() || {};
-    return Object.values(data);
+    return Object.values(snapshot.val() || {});
   } catch (e) {
     console.error('❌ fbGetDriverTripsOnce error:', e);
     return [];
   }
 }
 
-// تحميل تحديثات سائق لمرة واحدة
 async function fbGetDriverUpdatesOnce(driverId) {
   try {
     const snapshot = await db.ref(`updates/${driverId}`).once('value');
-    const data = snapshot.val() || {};
-    return Object.values(data);
+    return Object.values(snapshot.val() || {});
   } catch (e) {
     console.error('❌ fbGetDriverUpdatesOnce error:', e);
     return [];
   }
 }
 
-// تحميل override سائق لمرة واحدة
 async function fbGetDriverOverrideOnce(driverId) {
   try {
     const snapshot = await db.ref(`drivers_overrides/${driverId}`).once('value');
@@ -109,7 +102,6 @@ async function fbGetDriverOverrideOnce(driverId) {
   }
 }
 
-// تحميل كل الـ overrides لمرة واحدة
 async function fbGetAllOverridesOnce() {
   try {
     const snapshot = await db.ref('drivers_overrides').once('value');
@@ -120,16 +112,13 @@ async function fbGetAllOverridesOnce() {
   }
 }
 
-// تحميل كل التحديثات لمرة واحدة
 async function fbGetAllUpdatesOnce() {
   try {
     const snapshot = await db.ref('updates').once('value');
     const data = snapshot.val() || {};
     const all = [];
     for (const driverId in data) {
-      for (const updId in data[driverId]) {
-        all.push(data[driverId][updId]);
-      }
+      for (const updId in data[driverId]) all.push(data[driverId][updId]);
     }
     return all;
   } catch (e) {
@@ -138,7 +127,6 @@ async function fbGetAllUpdatesOnce() {
   }
 }
 
-// تحميل كل الحملات لمرة واحدة (للمشرف)
 async function fbGetAllTripsOnce() {
   try {
     const snapshot = await db.ref('trips').once('value');
@@ -149,22 +137,9 @@ async function fbGetAllTripsOnce() {
   }
 }
 
-// حذف حملة من Firebase
-async function fbDeleteTrip(driverId, tripId) {
-  try {
-    await db.ref(`trips/${driverId}/${tripId}`).remove();
-    return true;
-  } catch (e) {
-    console.error('fbDeleteTrip error:', e);
-    return false;
-  }
-}
-
-// رفع تحديثات الرصيد (تسوية/خصم)
 async function fbPushUpdate(update) {
   try {
     await db.ref(`updates/${update.driverId}/${update.id}`).set(update);
-    console.log('✅ fbPushUpdate success:', update.id);
     return true;
   } catch (e) {
     console.error('❌ fbPushUpdate error:', e);
@@ -172,11 +147,9 @@ async function fbPushUpdate(update) {
   }
 }
 
-// رفع تعديلات المشرف على السائق
 async function fbPushDriverOverride(driverId, patch) {
   try {
     await db.ref(`drivers_overrides/${driverId}`).update(patch);
-    console.log('✅ fbPushDriverOverride success:', driverId);
     return true;
   } catch (e) {
     console.error('❌ fbPushDriverOverride error:', e);
@@ -184,70 +157,45 @@ async function fbPushDriverOverride(driverId, patch) {
   }
 }
 
-// الاستماع لكل حملات سائق معين
 function fbListenDriverTrips(driverId, callback) {
   const ref = db.ref(`trips/${driverId}`);
-  ref.on('value', (snapshot) => {
-    const data = snapshot.val() || {};
-    const trips = Object.values(data);
-    callback(trips);
-  });
+  ref.on('value', (snapshot) => callback(Object.values(snapshot.val() || {})));
   return () => ref.off('value');
 }
 
-// الاستماع لتحديثات سائق (للسائق نفسه)
 function fbListenDriverUpdates(driverId, callback) {
   const ref = db.ref(`updates/${driverId}`);
-  ref.on('value', (snapshot) => {
-    const data = snapshot.val() || {};
-    const updates = Object.values(data);
-    callback(updates);
-  });
+  ref.on('value', (snapshot) => callback(Object.values(snapshot.val() || {})));
   return () => ref.off('value');
 }
 
-// الاستماع لتعديلات المشرف على السائق
 function fbListenDriverOverride(driverId, callback) {
   const ref = db.ref(`drivers_overrides/${driverId}`);
-  ref.on('value', (snapshot) => {
-    const data = snapshot.val() || {};
-    callback(data);
-  });
+  ref.on('value', (snapshot) => callback(snapshot.val() || {}));
   return () => ref.off('value');
 }
 
-// الاستماع لكل السواقين (للمشرف)
 function fbListenAllDrivers(callback) {
   const ref = db.ref('trips');
-  ref.on('value', (snapshot) => {
-    const data = snapshot.val() || {};
-    callback(data);
-  });
+  ref.on('value', (snapshot) => callback(snapshot.val() || {}));
   return () => ref.off('value');
 }
 
-// الاستماع لكل التحديثات (للمشرف)
 function fbListenAllUpdates(callback) {
   const ref = db.ref('updates');
   ref.on('value', (snapshot) => {
     const data = snapshot.val() || {};
     const allUpdates = [];
     for (const driverId in data) {
-      for (const updId in data[driverId]) {
-        allUpdates.push(data[driverId][updId]);
-      }
+      for (const updId in data[driverId]) allUpdates.push(data[driverId][updId]);
     }
     callback(allUpdates);
   });
   return () => ref.off('value');
 }
 
-// الاستماع لكل تعديلات السواقين (للمشرف)
 function fbListenAllOverrides(callback) {
   const ref = db.ref('drivers_overrides');
-  ref.on('value', (snapshot) => {
-    const data = snapshot.val() || {};
-    callback(data);
-  });
+  ref.on('value', (snapshot) => callback(snapshot.val() || {}));
   return () => ref.off('value');
 }
