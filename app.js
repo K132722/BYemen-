@@ -17,7 +17,7 @@ const STORAGE = {
    ============================================================ */
 const state = {
   user: null,
-  currentTripId: null,   // ✅ نستخدم ID فقط كمرجع للحملة النشطة
+  currentTripId: null,   // نستخدم ID فقط كمرجع للحملة النشطة
   online: navigator.onLine,
   drivers: {},
   trips: [],
@@ -29,7 +29,7 @@ const state = {
   editingTxId: null,
   editingModal: null,
   dataReady: false,      // هل تم تحميل البيانات من السيرفر
-  saving: false          // ✅ منع النقر المزدوج على أزرار الحفظ
+  saving: false          // منع النقر المزدوج على أزرار الحفظ
 };
 
 /* ============================================================
@@ -64,7 +64,7 @@ function toast(msg, type = '') {
   setTimeout(() => el.remove(), 2800);
 }
 
-// ✅ جلب الحملة الحالية بشكل آمن (مرجع حي داخل state.trips)
+// جلب الحملة الحالية بشكل آمن
 function getCurrentTrip() {
   if (!state.currentTripId) return null;
   return state.trips.find(t => t.id === state.currentTripId) || null;
@@ -156,12 +156,10 @@ function mergeTripsFromServer(serverTrips, driverId) {
   const otherTrips = state.trips.filter(t => t.driverId !== driverId);
   const merged = new Map();
 
-  // 1. أضف حملات السيرفر أولاً
   for (const t of serverTrips) {
     if (t && t.id) merged.set(t.id, t);
   }
 
-  // 2. ادمج الحملات المحلية (لا تمسح الحركات غير المرفوعة)
   for (const local of localTrips) {
     const server = merged.get(local.id);
     if (!server) {
@@ -435,9 +433,12 @@ async function deleteTransaction(txId) {
   saveTrips();
   renderTripScreen();
 
-  await fbPushTrip(trip);
-  trip.synced = true;
-  saveTrips();
+  fbPushTrip(trip).then(ok => {
+    if (ok) {
+      trip.synced = true;
+      saveTrips();
+    }
+  });
   queueSync('trip_update', { tripId: trip.id });
   toast('تم الحذف', 'ok');
 }
@@ -489,7 +490,7 @@ function editTransaction(txId) {
 }
 
 /* ============================================================
-   استلام عهدة
+   استلام عهدة (إضافة/تعديل) - مُحصَّن
    ============================================================ */
 function openIncomeModal() {
   state.editingTxId = null;
@@ -545,22 +546,28 @@ async function confirmIncome() {
     state.editingModal = null;
     renderTripScreen();
 
-    const ok = await fbPushTrip(trip);
-    if (ok) {
-      trip.synced = true;
-      saveTrips();
-    }
+    // الحفظ في الخلفية بدون تعليق الواجهة
+    fbPushTrip(trip).then(ok => {
+      if (ok) {
+        trip.synced = true;
+        saveTrips();
+      }
+    }).catch(err => {
+      console.warn('تأخر الاتصال بـ Firebase:', err);
+    });
+
     queueSync('trip_update', { tripId: trip.id });
+
   } catch (e) {
     console.error('confirmIncome error:', e);
-    toast('حدث خطأ أثناء الحفظ', 'err');
+    toast('خطأ: ' + (e.message || 'غير معروف'), 'err');
   } finally {
     state.saving = false;
   }
 }
 
 /* ============================================================
-   إدراج خرج
+   إدراج خرج (إضافة/تعديل) - مُحصَّن
    ============================================================ */
 function openExpenseModal() {
   state.editingTxId = null;
@@ -634,15 +641,21 @@ async function confirmExpense() {
     state.editingModal = null;
     renderTripScreen();
 
-    const ok = await fbPushTrip(trip);
-    if (ok) {
-      trip.synced = true;
-      saveTrips();
-    }
+    // الحفظ في الخلفية
+    fbPushTrip(trip).then(ok => {
+      if (ok) {
+        trip.synced = true;
+        saveTrips();
+      }
+    }).catch(err => {
+      console.warn('تأخر الاتصال بـ Firebase:', err);
+    });
+
     queueSync('trip_update', { tripId: trip.id });
+
   } catch (e) {
     console.error('confirmExpense error:', e);
-    toast('حدث خطأ أثناء الحفظ', 'err');
+    toast('خطأ: ' + (e.message || 'غير معروف'), 'err');
   } finally {
     state.saving = false;
   }
@@ -692,11 +705,13 @@ async function confirmFinish() {
 
     $('finishModal').classList.add('hidden');
 
-    const ok = await fbPushTrip(trip);
-    if (ok) {
-      trip.synced = true;
-      saveTrips();
-    }
+    fbPushTrip(trip).then(ok => {
+      if (ok) {
+        trip.synced = true;
+        saveTrips();
+      }
+    });
+    
     queueSync('trip_finish', { tripId: trip.id });
 
     const report = buildTripReport(trip);
