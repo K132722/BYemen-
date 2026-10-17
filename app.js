@@ -545,27 +545,18 @@ async function confirmIncome() {
     state.editingModal = null;
     renderTripScreen();
 
-    // محاولة الرفع بدون تعليق التطبيق إذا فشل
-    fbPushTrip(trip).then(ok => {
-      if (ok) {
-        trip.synced = true;
-        saveTrips();
-      }
-    }).catch(err => {
-      console.error('فشل الرفع لـ Firebase:', err);
-    });
-
-    // إضافة التحديث لطابور المزامنة
+    const ok = await fbPushTrip(trip);
+    if (ok) {
+      trip.synced = true;
+      saveTrips();
+    }
     queueSync('trip_update', { tripId: trip.id });
-
   } catch (e) {
     console.error('confirmIncome error:', e);
-    // إظهار الخطأ الحقيقي
-    toast('خطأ: ' + (e.message || 'غير معروف'), 'err');
+    toast('حدث خطأ أثناء الحفظ', 'err');
   } finally {
     state.saving = false;
   }
-}
 }
 
 /* ============================================================
