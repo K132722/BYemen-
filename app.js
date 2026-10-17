@@ -17,7 +17,7 @@ const STORAGE = {
    ============================================================ */
 const state = {
   user: null,
-  currentTrip: null,
+  currentTripId: null,   // ✅ نستخدم ID فقط كمرجع للحملة النشطة
   online: navigator.onLine,
   drivers: {},
   trips: [],
@@ -28,7 +28,8 @@ const state = {
   listeners: [],
   editingTxId: null,
   editingModal: null,
-  dataReady: false // ✅ جديد: هل تم تحميل بيانات السائق من السيرفر
+  dataReady: false,      // هل تم تحميل البيانات من السيرفر
+  saving: false          // ✅ منع النقر المزدوج على أزرار الحفظ
 };
 
 /* ============================================================
@@ -61,6 +62,12 @@ function toast(msg, type = '') {
   el.textContent = msg;
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 2800);
+}
+
+// ✅ جلب الحملة الحالية بشكل آمن (مرجع حي داخل state.trips)
+function getCurrentTrip() {
+  if (!state.currentTripId) return null;
+  return state.trips.find(t => t.id === state.currentTripId) || null;
 }
 
 /* ============================================================
@@ -142,29 +149,44 @@ function nextTripNumber(driverId) {
 }
 
 /* ============================================================
-   ✅ جديد: دمج حملات السيرفر مع المحلية
-   - Firebase هو المصدر الأساسي للحملات المتزامنة
-   - الحملات المحلية غير المتزامنة (synced=false) تبقى إن لم توجد على السيرفر
+   دمج حملات السيرفر مع المحلية بأمان
    ============================================================ */
 function mergeTripsFromServer(serverTrips, driverId) {
   const localTrips = state.trips.filter(t => t.driverId === driverId);
   const otherTrips = state.trips.filter(t => t.driverId !== driverId);
-
   const merged = new Map();
 
-  // أضف حملات السيرفر أولاً (هي المصدر)
+  // 1. أضف حملات السيرفر أولاً
   for (const t of serverTrips) {
     if (t && t.id) merged.set(t.id, t);
   }
 
-  // أضف الحملات المحلية غير المتزامنة فقط (لم تُرفع بعد)
-  for (const t of localTrips) {
-    if (!merged.has(t.id) && t.synced === false) {
-      merged.set(t.id, t);
+  // 2. ادمج الحملات المحلية (لا تمسح الحركات غير المرفوعة)
+  for (const local of localTrips) {
+    const server = merged.get(local.id);
+    if (!server) {
+      merged.set(local.id, local);
+      continue;
+    }
+
+    const serverTxIds = new Set((server.transactions || []).map(t => t.id));
+    const missingOnServer = (local.transactions || []).some(t => !serverTxIds.has(t.id));
+
+    if (missingOnServer || local.synced === false) {
+      const mergedTx = [...(server.transactions || [])];
+      for (const tx of (local.transactions || [])) {
+        if (!serverTxIds.has(tx.id)) mergedTx.push(tx);
+      }
+      merged.set(local.id, {
+        ...server,
+        transactions: mergedTx,
+        synced: local.synced
+      });
+    } else {
+      merged.set(local.id, server);
     }
   }
 
-  // رتّب حسب رقم الحملة
   const mergedArr = Array.from(merged.values())
     .sort((a,b) => (a.tripNumber||0) - (b.tripNumber||0));
 
@@ -174,35 +196,26 @@ function mergeTripsFromServer(serverTrips, driverId) {
 }
 
 /* ============================================================
-   ✅ جديد: تحميل بيانات السائق من السيرفر عند الدخول
+   تحميل بيانات السائق من السيرفر
    ============================================================ */
 async function hydrateDriverFromServer(driverId) {
-  if (!state.online) {
-    console.log('⚠️ Offline - استخدام البيانات المحلية');
-    return false;
-  }
+  if (!state.online) return false;
 
   try {
-    // 1) تحميل الحملات
     const serverTrips = await fbGetDriverTripsOnce(driverId);
     mergeTripsFromServer(serverTrips, driverId);
 
-    // 2) تحميل التحديثات (تسويات/خصومات)
     const serverUpdates = await fbGetDriverUpdatesOnce(driverId);
-    // ادمج مع المحلية (بحسب id)
     const updMap = new Map();
     for (const u of state.updates) updMap.set(u.id, u);
     for (const u of serverUpdates) updMap.set(u.id, u);
     state.updates = Array.from(updMap.values());
     store.set(STORAGE.UPDATES, state.updates);
 
-    // 3) تحميل overrides (تعديلات المشرف على بيانات السائق)
     const override = await fbGetDriverOverrideOnce(driverId);
     if (override && Object.keys(override).length) {
       saveDriverOverride(driverId, override);
     }
-
-    console.log('✅ hydrateDriverFromServer: done', driverId);
     return true;
   } catch (e) {
     console.error('❌ hydrateDriverFromServer error:', e);
@@ -211,7 +224,7 @@ async function hydrateDriverFromServer(driverId) {
 }
 
 /* ============================================================
-   ✅ جديد: تحميل بيانات المشرف من السيرفر
+   تحميل بيانات المشرف من السيرفر
    ============================================================ */
 async function hydrateAdminFromServer() {
   if (!state.online) return false;
@@ -241,7 +254,6 @@ async function hydrateAdminFromServer() {
     });
     state.trips = [...localAdminTrips, ...Array.from(mergedMap.values())];
     saveTrips();
-
     return true;
   } catch (e) {
     console.error('❌ hydrateAdminFromServer error:', e);
@@ -251,14 +263,7 @@ async function hydrateAdminFromServer() {
 
 /* ============================================================
    حساب الأرصدة
-   ============================================================
-   القاعدة:
-     المطلوب = المخارج + مستحق السواق
-     الفارق = العُهد - المطلوب
-     - إذا الفارق موجب (العُهد أكبر) ⇒ متبقي عليه (بالأحمر)
-     - إذا الفارق سالب (المخارج أكبر) ⇒ متبقي له (بالأخضر)
-     - إذا صفر ⇒ مُسوَّى
-*/
+   ============================================================ */
 function computeTripBalance(trip) {
   let income = 0, expense = 0;
   for (const t of trip.transactions || []) {
@@ -299,7 +304,6 @@ function balanceLabel(diff) {
 async function startNewTrip() {
   const driverId = state.user.id;
 
-  // ✅ تأكد من تحميل البيانات من السيرفر قبل البدء (لتجنب ترقيم خاطئ)
   if (!state.dataReady && state.online) {
     toast('جاري تحميل بياناتك من السيرفر...', '');
     await hydrateDriverFromServer(driverId);
@@ -340,7 +344,7 @@ async function startNewTrip() {
 function openTripScreen(tripId) {
   const trip = state.trips.find(t => t.id === tripId);
   if (!trip) return;
-  state.currentTrip = trip;
+  state.currentTripId = tripId; 
   renderTripScreen();
   show('tripScreen');
   updateSyncIndicator();
@@ -350,7 +354,7 @@ function openTripScreen(tripId) {
    عرض شاشة الحملة
    ============================================================ */
 function renderTripScreen() {
-  const trip = state.currentTrip;
+  const trip = getCurrentTrip();
   if (!trip) return;
   $('tripTitle').textContent = `الحملة رقم ${trip.tripNumber}`;
   $('tripStartInfo').textContent = `${trip.startDay} ${trip.startDate} - ${trip.startTime}`;
@@ -370,7 +374,7 @@ function renderTripScreen() {
 }
 
 function renderTransactions() {
-  const trip = state.currentTrip;
+  const trip = getCurrentTrip();
   const list = $('transactionsList');
   if (!trip || !trip.transactions || !trip.transactions.length) {
     list.innerHTML = '<div class="empty-state">لا توجد حركات بعد</div>';
@@ -424,18 +428,23 @@ function renderTransactions() {
 
 async function deleteTransaction(txId) {
   if (!confirm('تأكيد حذف الحركة؟')) return;
-  const trip = state.currentTrip;
+  const trip = getCurrentTrip();
+  if (!trip) return;
   trip.transactions = trip.transactions.filter(t => t.id !== txId);
+  trip.synced = false;
   saveTrips();
   renderTripScreen();
 
   await fbPushTrip(trip);
+  trip.synced = true;
+  saveTrips();
   queueSync('trip_update', { tripId: trip.id });
   toast('تم الحذف', 'ok');
 }
 
 function viewTransactionImage(txId) {
-  const trip = state.currentTrip;
+  const trip = getCurrentTrip();
+  if (!trip) return;
   const tx = trip.transactions.find(t => t.id === txId);
   if (!tx || !tx.imageUrl) return;
   $('previewImage').src = tx.imageUrl;
@@ -446,7 +455,8 @@ function viewTransactionImage(txId) {
    تعديل حركة موجودة
    ============================================================ */
 function editTransaction(txId) {
-  const trip = state.currentTrip;
+  const trip = getCurrentTrip();
+  if (!trip) return;
   const tx = trip.transactions.find(t => t.id === txId);
   if (!tx) return;
 
@@ -492,46 +502,70 @@ function openIncomeModal() {
 }
 
 async function confirmIncome() {
+  if (state.saving) return; 
   const from = $('incomeFrom').value.trim();
   const amount = Number($('incomeAmount').value);
-  const payType = document.querySelector('input[name="incomeType"]:checked').value;
+  const payType = document.querySelector('input[name="incomeType"]:checked')?.value || 'نقدا';
 
   if (!from) return toast('أدخل اسم المسلم', 'err');
   if (!amount || amount <= 0) return toast('أدخل مبلغاً صحيحاً', 'err');
 
-  const trip = state.currentTrip;
+  const trip = getCurrentTrip();
+  if (!trip) return toast('الحملة غير متاحة، أعد فتحها', 'err');
 
-  if (state.editingTxId) {
-    const tx = trip.transactions.find(t => t.id === state.editingTxId);
-    if (tx) {
-      tx.from = from;
-      tx.amount = amount;
-      tx.payType = payType;
-      tx.editedAt = new Date().toISOString();
+  state.saving = true;
+  try {
+    if (state.editingTxId) {
+      const tx = trip.transactions.find(t => t.id === state.editingTxId);
+      if (tx) {
+        tx.from = from;
+        tx.amount = amount;
+        tx.payType = payType;
+        tx.editedAt = new Date().toISOString();
+      }
+      toast('تم تعديل العهدة', 'ok');
+    } else {
+      const now = nowDate();
+      const tx = {
+        id: uid(),
+        kind: 'income',
+        from,
+        amount,
+        payType,
+        day: now.dayName, date: now.date, time: now.time, iso: now.iso
+      };
+      trip.transactions.push(tx);
+      toast('تمت إضافة العهدة', 'ok');
     }
-    toast('تم تعديل العهدة', 'ok');
-  } else {
-    const now = nowDate();
-    const tx = {
-      id: uid(),
-      kind: 'income',
-      from,
-      amount,
-      payType,
-      day: now.dayName, date: now.date, time: now.time, iso: now.iso
-    };
-    trip.transactions.push(tx);
-    toast('تمت إضافة العهدة', 'ok');
+
+    trip.synced = false;
+    saveTrips();
+    $('incomeModal').classList.add('hidden');
+    state.editingTxId = null;
+    state.editingModal = null;
+    renderTripScreen();
+
+    // محاولة الرفع بدون تعليق التطبيق إذا فشل
+    fbPushTrip(trip).then(ok => {
+      if (ok) {
+        trip.synced = true;
+        saveTrips();
+      }
+    }).catch(err => {
+      console.error('فشل الرفع لـ Firebase:', err);
+    });
+
+    // إضافة التحديث لطابور المزامنة
+    queueSync('trip_update', { tripId: trip.id });
+
+  } catch (e) {
+    console.error('confirmIncome error:', e);
+    // إظهار الخطأ الحقيقي
+    toast('خطأ: ' + (e.message || 'غير معروف'), 'err');
+  } finally {
+    state.saving = false;
   }
-
-  saveTrips();
-  $('incomeModal').classList.add('hidden');
-  state.editingTxId = null;
-  state.editingModal = null;
-  renderTripScreen();
-
-  await fbPushTrip(trip);
-  queueSync('trip_update', { tripId: trip.id });
+}
 }
 
 /* ============================================================
@@ -564,48 +598,63 @@ function handleExpenseImage(e) {
 }
 
 async function confirmExpense() {
+  if (state.saving) return;
   const amount = Number($('expenseAmount').value);
   const note = $('expenseNote').value.trim();
 
   if (!amount || amount <= 0) return toast('أدخل مبلغاً صحيحاً', 'err');
   if (!note) return toast('أدخل البيان', 'err');
 
-  const trip = state.currentTrip;
+  const trip = getCurrentTrip();
+  if (!trip) return toast('الحملة غير متاحة، أعد فتحها', 'err');
 
-  if (state.editingTxId) {
-    const tx = trip.transactions.find(t => t.id === state.editingTxId);
-    if (tx) {
-      tx.amount = amount;
-      tx.note = note;
-      if (state._pendingExpenseImage !== null) {
-        tx.imageUrl = state._pendingExpenseImage;
+  state.saving = true;
+  try {
+    if (state.editingTxId) {
+      const tx = trip.transactions.find(t => t.id === state.editingTxId);
+      if (tx) {
+        tx.amount = amount;
+        tx.note = note;
+        if (state._pendingExpenseImage !== null) {
+          tx.imageUrl = state._pendingExpenseImage;
+        }
+        tx.editedAt = new Date().toISOString();
       }
-      tx.editedAt = new Date().toISOString();
+      toast('تم تعديل الخرج', 'ok');
+    } else {
+      const now = nowDate();
+      const tx = {
+        id: uid(),
+        kind: 'expense',
+        amount,
+        note,
+        imageUrl: state._pendingExpenseImage || null,
+        day: now.dayName, date: now.date, time: now.time, iso: now.iso
+      };
+      trip.transactions.push(tx);
+      toast('تمت إضافة الخرج', 'ok');
     }
-    toast('تم تعديل الخرج', 'ok');
-  } else {
-    const now = nowDate();
-    const tx = {
-      id: uid(),
-      kind: 'expense',
-      amount,
-      note,
-      imageUrl: state._pendingExpenseImage || null,
-      day: now.dayName, date: now.date, time: now.time, iso: now.iso
-    };
-    trip.transactions.push(tx);
-    toast('تمت إضافة الخرج', 'ok');
+
+    state._pendingExpenseImage = null;
+    trip.synced = false;
+    saveTrips();
+    $('expenseModal').classList.add('hidden');
+    state.editingTxId = null;
+    state.editingModal = null;
+    renderTripScreen();
+
+    const ok = await fbPushTrip(trip);
+    if (ok) {
+      trip.synced = true;
+      saveTrips();
+    }
+    queueSync('trip_update', { tripId: trip.id });
+  } catch (e) {
+    console.error('confirmExpense error:', e);
+    toast('حدث خطأ أثناء الحفظ', 'err');
+  } finally {
+    state.saving = false;
   }
-
-  saveTrips();
-  state._pendingExpenseImage = null;
-  $('expenseModal').classList.add('hidden');
-  state.editingTxId = null;
-  state.editingModal = null;
-  renderTripScreen();
-
-  await fbPushTrip(trip);
-  queueSync('trip_update', { tripId: trip.id });
 }
 
 /* ============================================================
@@ -622,6 +671,7 @@ function openFinishModal() {
 }
 
 async function confirmFinish() {
+  if (state.saving) return;
   const info = {
     supplier: $('finishSupplier').value.trim(),
     supplierRegion: $('finishSupplierRegion').value.trim(),
@@ -634,23 +684,35 @@ async function confirmFinish() {
     return toast('أكمل جميع الحقول المطلوبة', 'err');
   }
 
-  const trip = state.currentTrip;
-  const now = nowDate();
-  trip.finishInfo = info;
-  trip.status = 'finished';
-  trip.endDay = now.dayName;
-  trip.endDate = now.date;
-  trip.endTime = now.time;
-  trip.endISO = now.iso;
-  saveTrips();
+  const trip = getCurrentTrip();
+  if (!trip) return toast('الحملة غير متاحة', 'err');
 
-  $('finishModal').classList.add('hidden');
+  state.saving = true;
+  try {
+    const now = nowDate();
+    trip.finishInfo = info;
+    trip.status = 'finished';
+    trip.endDay = now.dayName;
+    trip.endDate = now.date;
+    trip.endTime = now.time;
+    trip.endISO = now.iso;
+    trip.synced = false;
+    saveTrips();
 
-  await fbPushTrip(trip);
-  queueSync('trip_finish', { tripId: trip.id });
+    $('finishModal').classList.add('hidden');
 
-  const report = buildTripReport(trip);
-  showReport(report);
+    const ok = await fbPushTrip(trip);
+    if (ok) {
+      trip.synced = true;
+      saveTrips();
+    }
+    queueSync('trip_finish', { tripId: trip.id });
+
+    const report = buildTripReport(trip);
+    showReport(report);
+  } finally {
+    state.saving = false;
+  }
 }
 
 /* ============================================================
@@ -1358,21 +1420,15 @@ function doLogin() {
   afterLogin();
 }
 
-/* ============================================================
-   ✅ بعد الدخول - مع تحميل البيانات من السيرفر
-   ============================================================ */
 async function afterLogin() {
-  // نظّف المستمعين السابقين
   state.listeners.forEach(unsub => { try { unsub(); } catch(e){} });
   state.listeners = [];
 
   if (state.user.role === 'driver') {
-    // ✅ 1) حمّل بيانات السائق من السيرفر أولاً (قبل العرض)
     toast('جاري تحميل بياناتك...', '');
     await hydrateDriverFromServer(state.user.id);
     state.dataReady = true;
 
-    // 2) اعرض الشاشة المناسبة
     renderDriverHome();
     const active = getActiveTrip(state.user.id);
     if (active) {
@@ -1382,41 +1438,30 @@ async function afterLogin() {
       show('driverScreen');
     }
 
-    // 3) استمع للتحديثات الحية من Firebase
-
-    // 3a) التحديثات (تسويات/خصومات)
     const unsub1 = fbListenDriverUpdates(state.user.id, (updates) => {
       state.updates = updates;
       store.set(STORAGE.UPDATES, updates);
       renderDriverHome();
-      if (state.currentTrip) renderTripScreen();
+      if (state.currentTripId) renderTripScreen();
     });
     state.listeners.push(unsub1);
 
-    // 3b) overrides (تعديلات المشرف على بيانات السائق)
     const unsub2 = fbListenDriverOverride(state.user.id, (override) => {
       if (override && Object.keys(override).length) {
         saveDriverOverride(state.user.id, override);
         renderDriverHome();
-        if (state.currentTrip) renderTripScreen();
+        if (state.currentTripId) renderTripScreen();
       }
     });
     state.listeners.push(unsub2);
 
-    // ✅ 3c) جديد: الاستماع لحملات السائق من Firebase (تحديث لحظي)
     const unsub3 = fbListenDriverTrips(state.user.id, (serverTrips) => {
-      // ادمج فقط إذا تغيّر شيء
       mergeTripsFromServer(serverTrips, state.user.id);
       renderDriverHome();
-      // إذا كانت هناك حملة مفتوحة حالياً، حدّث مرجعها
-      if (state.currentTrip) {
-        const fresh = state.trips.find(t => t.id === state.currentTrip.id);
-        if (fresh) {
-          state.currentTrip = fresh;
-          renderTripScreen();
-        }
+      if (state.currentTripId) {
+        const fresh = state.trips.find(t => t.id === state.currentTripId);
+        if (fresh) renderTripScreen();
       }
-      // إذا لم تكن هناك حملة نشطة معروضة، افتح النشطة إن وجدت
       const activeTrip = getActiveTrip(state.user.id);
       if (activeTrip && $('tripScreen').classList.contains('hidden')) {
         openTripScreen(activeTrip.id);
@@ -1425,7 +1470,6 @@ async function afterLogin() {
     state.listeners.push(unsub3);
 
   } else {
-    // ===== مشرف =====
     toast('جاري تحميل بيانات المشرف...', '');
     await hydrateAdminFromServer();
     state.dataReady = true;
@@ -1477,7 +1521,7 @@ function logout() {
   if (!confirm('تأكيد الخروج؟')) return;
   store.remove(STORAGE.SESSION);
   state.user = null;
-  state.currentTrip = null;
+  state.currentTripId = null;
   state.dataReady = false;
   state.listeners.forEach(unsub => { try { unsub(); } catch(e){} });
   state.listeners = [];
@@ -1536,14 +1580,10 @@ function bindEvents() {
     updateSyncIndicator();
     trySync();
     toast('عاد الاتصال، جاري المزامنة...', 'ok');
-    // ✅ عند عودة الاتصال، أعد تحميل بيانات السائق
     if (state.user && state.user.role === 'driver') {
       await hydrateDriverFromServer(state.user.id);
       renderDriverHome();
-      if (state.currentTrip) {
-        const fresh = state.trips.find(t => t.id === state.currentTrip.id);
-        if (fresh) { state.currentTrip = fresh; renderTripScreen(); }
-      }
+      if (state.currentTripId) renderTripScreen();
     } else if (state.user && state.user.role === 'admin') {
       await hydrateAdminFromServer();
       renderAdminHome();
@@ -1577,7 +1617,6 @@ async function init() {
 
   const session = store.get(STORAGE.SESSION);
 
-  // ✅ إذا فيه جلسة محفوظة، أعرض الشاشة بسرعة ثم حمّل البيانات من السيرفر
   setTimeout(async () => {
     $('splash').classList.add('hide');
     setTimeout(() => $('splash').remove(), 500);
