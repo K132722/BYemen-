@@ -74,6 +74,81 @@ async function fbPushTrip(trip) {
   }
 }
 
+// ✅ جديد: تحميل حملات سائق لمرة واحدة (one-shot)
+async function fbGetDriverTripsOnce(driverId) {
+  try {
+    const snapshot = await db.ref(`trips/${driverId}`).once('value');
+    const data = snapshot.val() || {};
+    return Object.values(data);
+  } catch (e) {
+    console.error('❌ fbGetDriverTripsOnce error:', e);
+    return [];
+  }
+}
+
+// ✅ جديد: تحميل تحديثات سائق لمرة واحدة
+async function fbGetDriverUpdatesOnce(driverId) {
+  try {
+    const snapshot = await db.ref(`updates/${driverId}`).once('value');
+    const data = snapshot.val() || {};
+    return Object.values(data);
+  } catch (e) {
+    console.error('❌ fbGetDriverUpdatesOnce error:', e);
+    return [];
+  }
+}
+
+// ✅ جديد: تحميل override سائق لمرة واحدة
+async function fbGetDriverOverrideOnce(driverId) {
+  try {
+    const snapshot = await db.ref(`drivers_overrides/${driverId}`).once('value');
+    return snapshot.val() || {};
+  } catch (e) {
+    console.error('❌ fbGetDriverOverrideOnce error:', e);
+    return {};
+  }
+}
+
+// ✅ جديد: تحميل كل الـ overrides لمرة واحدة
+async function fbGetAllOverridesOnce() {
+  try {
+    const snapshot = await db.ref('drivers_overrides').once('value');
+    return snapshot.val() || {};
+  } catch (e) {
+    console.error('❌ fbGetAllOverridesOnce error:', e);
+    return {};
+  }
+}
+
+// ✅ جديد: تحميل كل التحديثات لمرة واحدة
+async function fbGetAllUpdatesOnce() {
+  try {
+    const snapshot = await db.ref('updates').once('value');
+    const data = snapshot.val() || {};
+    const all = [];
+    for (const driverId in data) {
+      for (const updId in data[driverId]) {
+        all.push(data[driverId][updId]);
+      }
+    }
+    return all;
+  } catch (e) {
+    console.error('❌ fbGetAllUpdatesOnce error:', e);
+    return [];
+  }
+}
+
+// ✅ جديد: تحميل كل الحملات لمرة واحدة (للمشرف)
+async function fbGetAllTripsOnce() {
+  try {
+    const snapshot = await db.ref('trips').once('value');
+    return snapshot.val() || {};
+  } catch (e) {
+    console.error('❌ fbGetAllTripsOnce error:', e);
+    return {};
+  }
+}
+
 // حذف حملة من Firebase
 async function fbDeleteTrip(driverId, tripId) {
   try {
@@ -109,7 +184,7 @@ async function fbPushDriverOverride(driverId, patch) {
   }
 }
 
-// الاستماع لكل حملات سائق معين (للمشرف)
+// الاستماع لكل حملات سائق معين
 function fbListenDriverTrips(driverId, callback) {
   const ref = db.ref(`trips/${driverId}`);
   ref.on('value', (snapshot) => {
