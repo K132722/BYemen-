@@ -1,5 +1,5 @@
 /* ============================================================
-   تطبيق متابعة عُهد السواقين - المنطق الرئيسي
+   تطبيق متابعة عُهد السواقين - المنطق الرئيسي (النسخة النهائية)
    ============================================================ */
 
 const SERVER_URL = localStorage.getItem('server_url') || 'https://by1010.onrender.com';
@@ -17,7 +17,7 @@ const STORAGE = {
    ============================================================ */
 const state = {
   user: null,
-  currentTripId: null,   // نستخدم ID فقط كمرجع للحملة النشطة
+  currentTripId: null,
   online: navigator.onLine,
   drivers: {},
   trips: [],
@@ -28,8 +28,8 @@ const state = {
   listeners: [],
   editingTxId: null,
   editingModal: null,
-  dataReady: false,      // هل تم تحميل البيانات من السيرفر
-  saving: false          // منع النقر المزدوج على أزرار الحفظ
+  dataReady: false,
+  saving: false
 };
 
 /* ============================================================
@@ -64,10 +64,14 @@ function toast(msg, type = '') {
   setTimeout(() => el.remove(), 2800);
 }
 
-// جلب الحملة الحالية بشكل آمن
+// جلب الحملة الحالية بشكل آمن وتأمين مصفوفة الحركات
 function getCurrentTrip() {
   if (!state.currentTripId) return null;
-  return state.trips.find(t => t.id === state.currentTripId) || null;
+  const trip = state.trips.find(t => t.id === state.currentTripId);
+  if (trip && !trip.transactions) {
+    trip.transactions = []; // ✅ حماية إجبارية
+  }
+  return trip || null;
 }
 
 /* ============================================================
@@ -157,12 +161,16 @@ function mergeTripsFromServer(serverTrips, driverId) {
   const merged = new Map();
 
   for (const t of serverTrips) {
-    if (t && t.id) merged.set(t.id, t);
+    if (t && t.id) {
+      if (!t.transactions) t.transactions = []; // ✅ حماية
+      merged.set(t.id, t);
+    }
   }
 
   for (const local of localTrips) {
     const server = merged.get(local.id);
     if (!server) {
+      if (!local.transactions) local.transactions = []; // ✅ حماية
       merged.set(local.id, local);
       continue;
     }
@@ -240,7 +248,9 @@ async function hydrateAdminFromServer() {
     for (const driverId in allTrips) {
       const driverTrips = allTrips[driverId];
       for (const tripId in driverTrips) {
-        firebaseTrips.push(driverTrips[tripId]);
+        const trip = driverTrips[tripId];
+        if (!trip.transactions) trip.transactions = []; // ✅ حماية
+        firebaseTrips.push(trip);
       }
     }
     const localAdminTrips = state.trips.filter(t => t.driverId === 'admin');
@@ -342,6 +352,7 @@ async function startNewTrip() {
 function openTripScreen(tripId) {
   const trip = state.trips.find(t => t.id === tripId);
   if (!trip) return;
+  if (!trip.transactions) trip.transactions = []; // ✅ حماية
   state.currentTripId = tripId; 
   renderTripScreen();
   show('tripScreen');
@@ -428,6 +439,8 @@ async function deleteTransaction(txId) {
   if (!confirm('تأكيد حذف الحركة؟')) return;
   const trip = getCurrentTrip();
   if (!trip) return;
+  if (!trip.transactions) trip.transactions = [];
+
   trip.transactions = trip.transactions.filter(t => t.id !== txId);
   trip.synced = false;
   saveTrips();
@@ -458,6 +471,8 @@ function viewTransactionImage(txId) {
 function editTransaction(txId) {
   const trip = getCurrentTrip();
   if (!trip) return;
+  if (!trip.transactions) trip.transactions = [];
+  
   const tx = trip.transactions.find(t => t.id === txId);
   if (!tx) return;
 
@@ -490,7 +505,7 @@ function editTransaction(txId) {
 }
 
 /* ============================================================
-   استلام عهدة (إضافة/تعديل) - مُحصَّن
+   استلام عهدة (إضافة/تعديل)
    ============================================================ */
 function openIncomeModal() {
   state.editingTxId = null;
@@ -513,6 +528,8 @@ async function confirmIncome() {
 
   const trip = getCurrentTrip();
   if (!trip) return toast('الحملة غير متاحة، أعد فتحها', 'err');
+
+  if (!trip.transactions) trip.transactions = [];
 
   state.saving = true;
   try {
@@ -546,7 +563,6 @@ async function confirmIncome() {
     state.editingModal = null;
     renderTripScreen();
 
-    // الحفظ في الخلفية بدون تعليق الواجهة
     fbPushTrip(trip).then(ok => {
       if (ok) {
         trip.synced = true;
@@ -567,7 +583,7 @@ async function confirmIncome() {
 }
 
 /* ============================================================
-   إدراج خرج (إضافة/تعديل) - مُحصَّن
+   إدراج خرج (إضافة/تعديل)
    ============================================================ */
 function openExpenseModal() {
   state.editingTxId = null;
@@ -606,6 +622,8 @@ async function confirmExpense() {
   const trip = getCurrentTrip();
   if (!trip) return toast('الحملة غير متاحة، أعد فتحها', 'err');
 
+  if (!trip.transactions) trip.transactions = [];
+
   state.saving = true;
   try {
     if (state.editingTxId) {
@@ -641,7 +659,6 @@ async function confirmExpense() {
     state.editingModal = null;
     renderTripScreen();
 
-    // الحفظ في الخلفية
     fbPushTrip(trip).then(ok => {
       if (ok) {
         trip.synced = true;
@@ -1235,7 +1252,9 @@ function renderAdminHome() {
     const label = bal > 0 ? `عليه ${fmtMoney(bal)}` : bal < 0 ? `له ${fmtMoney(Math.abs(bal))}` : 'مُسوَّى';
     const cls = bal > 0 ? 'pos' : bal < 0 ? 'neg' : '';
     row.innerHTML = `
-      <div class="driver-avatar">👤</div>
+      <div class="driver-avatar">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+      </div>
       <div class="driver-info">
         <div class="driver-name">${d.name}</div>
         <div class="driver-meta">${d.trailer} • ${d.phone}</div>
