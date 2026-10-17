@@ -27,7 +27,8 @@ const state = {
   reportTripId: null,
   listeners: [],
   editingTxId: null,
-  editingModal: null // 'income' | 'expense'
+  editingModal: null,
+  dataReady: false // ✅ جديد: هل تم تحميل بيانات السائق من السيرفر
 };
 
 /* ============================================================
@@ -135,11 +136,176 @@ function getActiveTrip(driverId) {
 
 function nextTripNumber(driverId) {
   const trips = getDriverTrips(driverId);
-  return trips.length + 1;
+  if (!trips.length) return 1;
+  const maxNum = Math.max(...trips.map(t => Number(t.tripNumber) || 0));
+  return maxNum + 1;
 }
 
+/* ============================================================
+   ✅ جديد: دمج حملات السيرفر مع المحلية
+   - Firebase هو المصدر الأساسي للحملات المتزامنة
+   - الحملات المحلية غير المتزامنة (synced=false) تبقى إن لم توجد على السيرفر
+   ============================================================ */
+function mergeTripsFromServer(serverTrips, driverId) {
+  const localTrips = state.trips.filter(t => t.driverId === driverId);
+  const otherTrips = state.trips.filter(t => t.driverId !== driverId);
+
+  const merged = new Map();
+
+  // أضف حملات السيرفر أولاً (هي المصدر)
+  for (const t of serverTrips) {
+    if (t && t.id) merged.set(t.id, t);
+  }
+
+  // أضف الحملات المحلية غير المتزامنة فقط (لم تُرفع بعد)
+  for (const t of localTrips) {
+    if (!merged.has(t.id) && t.synced === false) {
+      merged.set(t.id, t);
+    }
+  }
+
+  // رتّب حسب رقم الحملة
+  const mergedArr = Array.from(merged.values())
+    .sort((a,b) => (a.tripNumber||0) - (b.tripNumber||0));
+
+  state.trips = [...otherTrips, ...mergedArr];
+  saveTrips();
+  return mergedArr;
+}
+
+/* ============================================================
+   ✅ جديد: تحميل بيانات السائق من السيرفر عند الدخول
+   ============================================================ */
+async function hydrateDriverFromServer(driverId) {
+  if (!state.online) {
+    console.log('⚠️ Offline - استخدام البيانات المحلية');
+    return false;
+  }
+
+  try {
+    // 1) تحميل الحملات
+    const serverTrips = await fbGetDriverTripsOnce(driverId);
+    mergeTripsFromServer(serverTrips, driverId);
+
+    // 2) تحميل التحديثات (تسويات/خصومات)
+    const serverUpdates = await fbGetDriverUpdatesOnce(driverId);
+    // ادمج مع المحلية (بحسب id)
+    const updMap = new Map();
+    for (const u of state.updates) updMap.set(u.id, u);
+    for (const u of serverUpdates) updMap.set(u.id, u);
+    state.updates = Array.from(updMap.values());
+    store.set(STORAGE.UPDATES, state.updates);
+
+    // 3) تحميل overrides (تعديلات المشرف على بيانات السائق)
+    const override = await fbGetDriverOverrideOnce(driverId);
+    if (override && Object.keys(override).length) {
+      saveDriverOverride(driverId, override);
+    }
+
+    console.log('✅ hydrateDriverFromServer: done', driverId);
+    return true;
+  } catch (e) {
+    console.error('❌ hydrateDriverFromServer error:', e);
+    return false;
+  }
+}
+
+/* ============================================================
+   ✅ جديد: تحميل بيانات المشرف من السيرفر
+   ============================================================ */
+async function hydrateAdminFromServer() {
+  if (!state.online) return false;
+  try {
+    const allOverrides = await fbGetAllOverridesOnce();
+    store.set(STORAGE.DRIVERS, allOverrides || {});
+    getDrivers();
+
+    const allUpdates = await fbGetAllUpdatesOnce();
+    state.updates = allUpdates;
+    store.set(STORAGE.UPDATES, allUpdates);
+
+    const allTrips = await fbGetAllTripsOnce();
+    const firebaseTrips = [];
+    for (const driverId in allTrips) {
+      const driverTrips = allTrips[driverId];
+      for (const tripId in driverTrips) {
+        firebaseTrips.push(driverTrips[tripId]);
+      }
+    }
+    const localAdminTrips = state.trips.filter(t => t.driverId === 'admin');
+    const localUnsynced = state.trips.filter(t => t.synced === false && t.driverId !== 'admin');
+    const mergedMap = new Map();
+    firebaseTrips.forEach(t => mergedMap.set(t.id, t));
+    localUnsynced.forEach(t => {
+      if (!mergedMap.has(t.id)) mergedMap.set(t.id, t);
+    });
+    state.trips = [...localAdminTrips, ...Array.from(mergedMap.values())];
+    saveTrips();
+
+    return true;
+  } catch (e) {
+    console.error('❌ hydrateAdminFromServer error:', e);
+    return false;
+  }
+}
+
+/* ============================================================
+   حساب الأرصدة
+   ============================================================
+   القاعدة:
+     المطلوب = المخارج + مستحق السواق
+     الفارق = العُهد - المطلوب
+     - إذا الفارق موجب (العُهد أكبر) ⇒ متبقي عليه (بالأحمر)
+     - إذا الفارق سالب (المخارج أكبر) ⇒ متبقي له (بالأخضر)
+     - إذا صفر ⇒ مُسوَّى
+*/
+function computeTripBalance(trip) {
+  let income = 0, expense = 0;
+  for (const t of trip.transactions || []) {
+    if (t.kind === 'income') income += Number(t.amount);
+    else if (t.kind === 'expense') expense += Number(t.amount);
+  }
+  const due = Number(trip.duePerTrip || 0);
+  const required = expense + due;
+  const diff = income - required;
+  return { income, expense, due, required, diff };
+}
+
+function computeDriverOverallBalance(driverId) {
+  const trips = getDriverTrips(driverId);
+  let balance = 0;
+  for (const t of trips) {
+    if (t.status === 'finished') {
+      const b = computeTripBalance(t);
+      balance += b.diff;
+    }
+  }
+  const updates = state.updates.filter(u => u.driverId === driverId);
+  for (const u of updates) {
+    balance += Number(u.delta || 0);
+  }
+  return balance;
+}
+
+function balanceLabel(diff) {
+  if (diff > 0) return { text: `متبقي عليه ${fmtMoney(diff)}`, cls: 'pos' };
+  if (diff < 0) return { text: `متبقي له ${fmtMoney(Math.abs(diff))}`, cls: 'neg' };
+  return { text: 'مُسوَّى', cls: '' };
+}
+
+/* ============================================================
+   بدء حملة جديدة
+   ============================================================ */
 async function startNewTrip() {
   const driverId = state.user.id;
+
+  // ✅ تأكد من تحميل البيانات من السيرفر قبل البدء (لتجنب ترقيم خاطئ)
+  if (!state.dataReady && state.online) {
+    toast('جاري تحميل بياناتك من السيرفر...', '');
+    await hydrateDriverFromServer(driverId);
+    state.dataReady = true;
+  }
+
   if (getActiveTrip(driverId)) {
     toast('لديك حملة نشطة بالفعل', 'err');
     return;
@@ -178,51 +344,6 @@ function openTripScreen(tripId) {
   renderTripScreen();
   show('tripScreen');
   updateSyncIndicator();
-}
-
-/* ============================================================
-   حساب الأرصدة - ✅ تصحيح المنطق
-   ============================================================
-   القاعدة:
-     المطلوب = المخارج + مستحق السواق
-     الفارق = العُهد - المطلوب
-     - إذا الفارق موجب (العُهد أكبر) ⇒ متبقي عليه (بالأحمر)
-     - إذا الفارق سالب (المخارج أكبر) ⇒ متبقي له (بالأخضر)
-     - إذا صفر ⇒ مُسوَّى
-*/
-function computeTripBalance(trip) {
-  let income = 0, expense = 0;
-  for (const t of trip.transactions || []) {
-    if (t.kind === 'income') income += Number(t.amount);
-    else if (t.kind === 'expense') expense += Number(t.amount);
-  }
-  const due = Number(trip.duePerTrip || 0);
-  const required = expense + due;          // المطلوب من السواق
-  const diff = income - required;          // موجب = عليه، سالب = له
-  return { income, expense, due, required, diff };
-}
-
-function computeDriverOverallBalance(driverId) {
-  const trips = getDriverTrips(driverId);
-  let balance = 0; // موجب = عليه، سالب = له
-  for (const t of trips) {
-    if (t.status === 'finished') {
-      const b = computeTripBalance(t);
-      balance += b.diff;
-    }
-  }
-  const updates = state.updates.filter(u => u.driverId === driverId);
-  for (const u of updates) {
-    balance += Number(u.delta || 0);
-  }
-  return balance;
-}
-
-// دالة مساعدة للعرض: ترجع نص + كلاس
-function balanceLabel(diff) {
-  if (diff > 0) return { text: `متبقي عليه ${fmtMoney(diff)}`, cls: 'pos' };     // أحمر
-  if (diff < 0) return { text: `متبقي له ${fmtMoney(Math.abs(diff))}`, cls: 'neg' }; // أخضر
-  return { text: 'مُسوَّى', cls: '' };
 }
 
 /* ============================================================
@@ -322,7 +443,7 @@ function viewTransactionImage(txId) {
 }
 
 /* ============================================================
-   ✅ تعديل حركة موجودة
+   تعديل حركة موجودة
    ============================================================ */
 function editTransaction(txId) {
   const trip = state.currentTrip;
@@ -358,7 +479,7 @@ function editTransaction(txId) {
 }
 
 /* ============================================================
-   استلام عهدة (إضافة/تعديل)
+   استلام عهدة
    ============================================================ */
 function openIncomeModal() {
   state.editingTxId = null;
@@ -381,7 +502,6 @@ async function confirmIncome() {
   const trip = state.currentTrip;
 
   if (state.editingTxId) {
-    // تعديل
     const tx = trip.transactions.find(t => t.id === state.editingTxId);
     if (tx) {
       tx.from = from;
@@ -391,7 +511,6 @@ async function confirmIncome() {
     }
     toast('تم تعديل العهدة', 'ok');
   } else {
-    // إضافة
     const now = nowDate();
     const tx = {
       id: uid(),
@@ -416,7 +535,7 @@ async function confirmIncome() {
 }
 
 /* ============================================================
-   إدراج خرج (إضافة/تعديل)
+   إدراج خرج
    ============================================================ */
 function openExpenseModal() {
   state.editingTxId = null;
@@ -454,7 +573,6 @@ async function confirmExpense() {
   const trip = state.currentTrip;
 
   if (state.editingTxId) {
-    // تعديل
     const tx = trip.transactions.find(t => t.id === state.editingTxId);
     if (tx) {
       tx.amount = amount;
@@ -466,7 +584,6 @@ async function confirmExpense() {
     }
     toast('تم تعديل الخرج', 'ok');
   } else {
-    // إضافة
     const now = nowDate();
     const tx = {
       id: uid(),
@@ -610,18 +727,16 @@ function showReport(report) {
 }
 
 /* ============================================================
-   توليد PDF مع دعم الخط العربي
+   توليد PDF
    ============================================================ */
 let _arabicFontBase64 = null;
 
 async function loadArabicFont() {
   if (_arabicFontBase64) return _arabicFontBase64;
   try {
-    // خط Amiri من CDN (base64 جاهز)
     const res = await fetch('https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/amiri/Amiri-Regular.ttf');
     if (!res.ok) return null;
     const buf = await res.arrayBuffer();
-    // تحويل إلى base64
     let binary = '';
     const bytes = new Uint8Array(buf);
     const chunkSize = 0x8000;
@@ -640,7 +755,6 @@ async function generatePDF(trip) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'p', unit: 'mm', format: 'a4' });
 
-  // تحميل الخط العربي
   const fontB64 = await loadArabicFont();
   let hasArabic = false;
   if (fontB64) {
@@ -658,10 +772,8 @@ async function generatePDF(trip) {
   const b = computeTripBalance(trip);
   const r = balanceLabel(b.diff);
 
-  // ================= Header =================
   const pageW = doc.internal.pageSize.getWidth();
 
-  // شريط علوي ملوّن
   doc.setFillColor(21, 26, 61);
   doc.rect(0, 0, pageW, 30, 'F');
 
@@ -676,7 +788,6 @@ async function generatePDF(trip) {
 
   doc.setTextColor(0, 0, 0);
 
-  // ================= معلومات عامة =================
   let y = 40;
   doc.setFontSize(11);
   const dateRange = `${trip.startDate} ${trip.startTime}  →  ${trip.endDate || ''} ${trip.endTime || ''}`;
@@ -699,7 +810,6 @@ async function generatePDF(trip) {
   }
   y += 4;
 
-  // ================= جدول الحركات =================
   const head = hasArabic
     ? [['#', 'النوع', 'المبلغ', 'البيان', 'التاريخ']]
     : [['#', 'Type', 'Amount', 'Note', 'Date']];
@@ -731,7 +841,6 @@ async function generatePDF(trip) {
     theme: 'grid'
   });
 
-  // ================= ملخص =================
   y = doc.lastAutoTable.finalY + 12;
   doc.setFontSize(12);
   doc.setFont(hasArabic ? 'Amiri' : 'helvetica');
@@ -751,9 +860,8 @@ async function generatePDF(trip) {
   doc.setTextColor(31, 41, 55);
   doc.text(hasArabic ? `إجمالي المطلوب: ${b.required} ريال` : `Total Required: ${b.required}`, rightX, y, { align: 'right' }); y += lineH + 4;
 
-  // النتيجة النهائية بلون
-  if (b.diff > 0) doc.setTextColor(220, 38, 38);       // أحمر = عليه
-  else if (b.diff < 0) doc.setTextColor(5, 150, 105);   // أخضر = له
+  if (b.diff > 0) doc.setTextColor(220, 38, 38);
+  else if (b.diff < 0) doc.setTextColor(5, 150, 105);
   else doc.setTextColor(100, 100, 100);
 
   doc.setFontSize(14);
@@ -762,7 +870,6 @@ async function generatePDF(trip) {
     : (b.diff > 0 ? `Due from driver: ${b.diff}` : b.diff < 0 ? `Credit to driver: ${Math.abs(b.diff)}` : 'Settled');
   doc.text(finalText, rightX, y, { align: 'right' });
 
-  // Footer
   const pageH = doc.internal.pageSize.getHeight();
   doc.setFontSize(9);
   doc.setTextColor(150, 150, 150);
@@ -962,7 +1069,7 @@ function renderDriverHome() {
   $('dPhone').textContent = '📞 ' + d.phone;
   $('dTrailer').textContent = '🚛 ' + d.trailer;
 
-  const bal = computeDriverOverallBalance(u.id); // موجب = عليه
+  const bal = computeDriverOverallBalance(u.id);
   const el = $('dBalance');
   el.textContent = fmtMoney(Math.abs(bal));
   el.className = 'balance-value ' + (bal > 0 ? 'positive' : bal < 0 ? 'negative' : '');
@@ -1054,7 +1161,7 @@ function renderAdminHome() {
   driverIds.forEach(id => {
     const d = state.drivers[id];
     if (!d) return;
-    const bal = computeDriverOverallBalance(id); // موجب = عليه
+    const bal = computeDriverOverallBalance(id);
     const row = document.createElement('div');
     row.className = 'driver-row';
     const label = bal > 0 ? `عليه ${fmtMoney(bal)}` : bal < 0 ? `له ${fmtMoney(Math.abs(bal))}` : 'مُسوَّى';
@@ -1196,12 +1303,6 @@ async function confirmSettle() {
   const note = $('settleNote').value.trim();
   if (!amount || amount <= 0) return toast('أدخل مبلغاً صحيحاً', 'err');
 
-  // ملاحظة:
-  // delta موجب ⇒ إضافة مبلغ للرصيد
-  //   في منطقنا "موجب = عليه" ⇒ إضافة تعني زيادة ما عليه؟
-  //   لكن تسوية المشرف تعني: خصم من المبلغ اللي عليه ⇒ delta سالب
-  // لتوضيح: المشرف يعمل "تسوية" لصالح السواق (خصم من اللي عليه) ⇒ delta سالب
-  // أو "خصم على السواق" (زيادة ما عليه) ⇒ delta موجب
   const delta = state._settleMode === 'deduct' ? amount : -amount;
 
   const update = {
@@ -1257,11 +1358,21 @@ function doLogin() {
   afterLogin();
 }
 
-function afterLogin() {
+/* ============================================================
+   ✅ بعد الدخول - مع تحميل البيانات من السيرفر
+   ============================================================ */
+async function afterLogin() {
+  // نظّف المستمعين السابقين
   state.listeners.forEach(unsub => { try { unsub(); } catch(e){} });
   state.listeners = [];
 
   if (state.user.role === 'driver') {
+    // ✅ 1) حمّل بيانات السائق من السيرفر أولاً (قبل العرض)
+    toast('جاري تحميل بياناتك...', '');
+    await hydrateDriverFromServer(state.user.id);
+    state.dataReady = true;
+
+    // 2) اعرض الشاشة المناسبة
     renderDriverHome();
     const active = getActiveTrip(state.user.id);
     if (active) {
@@ -1271,6 +1382,9 @@ function afterLogin() {
       show('driverScreen');
     }
 
+    // 3) استمع للتحديثات الحية من Firebase
+
+    // 3a) التحديثات (تسويات/خصومات)
     const unsub1 = fbListenDriverUpdates(state.user.id, (updates) => {
       state.updates = updates;
       store.set(STORAGE.UPDATES, updates);
@@ -1279,6 +1393,7 @@ function afterLogin() {
     });
     state.listeners.push(unsub1);
 
+    // 3b) overrides (تعديلات المشرف على بيانات السائق)
     const unsub2 = fbListenDriverOverride(state.user.id, (override) => {
       if (override && Object.keys(override).length) {
         saveDriverOverride(state.user.id, override);
@@ -1288,7 +1403,33 @@ function afterLogin() {
     });
     state.listeners.push(unsub2);
 
+    // ✅ 3c) جديد: الاستماع لحملات السائق من Firebase (تحديث لحظي)
+    const unsub3 = fbListenDriverTrips(state.user.id, (serverTrips) => {
+      // ادمج فقط إذا تغيّر شيء
+      mergeTripsFromServer(serverTrips, state.user.id);
+      renderDriverHome();
+      // إذا كانت هناك حملة مفتوحة حالياً، حدّث مرجعها
+      if (state.currentTrip) {
+        const fresh = state.trips.find(t => t.id === state.currentTrip.id);
+        if (fresh) {
+          state.currentTrip = fresh;
+          renderTripScreen();
+        }
+      }
+      // إذا لم تكن هناك حملة نشطة معروضة، افتح النشطة إن وجدت
+      const activeTrip = getActiveTrip(state.user.id);
+      if (activeTrip && $('tripScreen').classList.contains('hidden')) {
+        openTripScreen(activeTrip.id);
+      }
+    });
+    state.listeners.push(unsub3);
+
   } else {
+    // ===== مشرف =====
+    toast('جاري تحميل بيانات المشرف...', '');
+    await hydrateAdminFromServer();
+    state.dataReady = true;
+
     show('adminScreen');
     renderAdminHome();
 
@@ -1301,8 +1442,12 @@ function afterLogin() {
         }
       }
       const localAdminTrips = state.trips.filter(t => t.driverId === 'admin');
+      const localUnsynced = state.trips.filter(t => t.synced === false && t.driverId !== 'admin');
       const mergedMap = new Map();
       firebaseTrips.forEach(t => mergedMap.set(t.id, t));
+      localUnsynced.forEach(t => {
+        if (!mergedMap.has(t.id)) mergedMap.set(t.id, t);
+      });
       state.trips = [...localAdminTrips, ...Array.from(mergedMap.values())];
       saveTrips();
       renderAdminHome();
@@ -1333,6 +1478,7 @@ function logout() {
   store.remove(STORAGE.SESSION);
   state.user = null;
   state.currentTrip = null;
+  state.dataReady = false;
   state.listeners.forEach(unsub => { try { unsub(); } catch(e){} });
   state.listeners = [];
   show('loginScreen');
@@ -1385,11 +1531,23 @@ function bindEvents() {
   $('settleConfirm').onclick = confirmSettle;
   $('settleCancel').onclick = () => $('settleModal').classList.add('hidden');
 
-  window.addEventListener('online', () => {
+  window.addEventListener('online', async () => {
     state.online = true;
     updateSyncIndicator();
     trySync();
     toast('عاد الاتصال، جاري المزامنة...', 'ok');
+    // ✅ عند عودة الاتصال، أعد تحميل بيانات السائق
+    if (state.user && state.user.role === 'driver') {
+      await hydrateDriverFromServer(state.user.id);
+      renderDriverHome();
+      if (state.currentTrip) {
+        const fresh = state.trips.find(t => t.id === state.currentTrip.id);
+        if (fresh) { state.currentTrip = fresh; renderTripScreen(); }
+      }
+    } else if (state.user && state.user.role === 'admin') {
+      await hydrateAdminFromServer();
+      renderAdminHome();
+    }
   });
   window.addEventListener('offline', () => {
     state.online = false;
@@ -1410,7 +1568,7 @@ function bindEvents() {
 /* ============================================================
    تهيئة التطبيق
    ============================================================ */
-function init() {
+async function init() {
   loadTrips();
   state.updates = store.get(STORAGE.UPDATES, []);
   state.pendingSync = store.get(STORAGE.PENDING, []);
@@ -1418,13 +1576,15 @@ function init() {
   bindEvents();
 
   const session = store.get(STORAGE.SESSION);
-  setTimeout(() => {
+
+  // ✅ إذا فيه جلسة محفوظة، أعرض الشاشة بسرعة ثم حمّل البيانات من السيرفر
+  setTimeout(async () => {
     $('splash').classList.add('hide');
     setTimeout(() => $('splash').remove(), 500);
 
     if (session && session.id) {
       state.user = session;
-      afterLogin();
+      await afterLogin();
     } else {
       show('loginScreen');
     }
